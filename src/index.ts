@@ -171,6 +171,7 @@ export function createParticleEditor(
   let batch: BatchedRenderer
   let grid: THREE.GridHelper
   let resize: ResizeObserver | undefined
+  let pendingSize: { width: number; height: number } | undefined
   const undoStack: EffectFile[] = []
   const redoStack: EffectFile[] = []
   const collapsedModules = new Set<string>()
@@ -818,18 +819,27 @@ export function createParticleEditor(
     scene.add(floor)
     batch = new BatchedRenderer()
     scene.add(batch)
+    const viewport = $<HTMLElement>('.viewport')
     resize = new ResizeObserver(() => {
-      const rect = canvas.getBoundingClientRect()
+      const rect = viewport.getBoundingClientRect()
       if (!rect.width || !rect.height) return
-      renderer.setSize(rect.width, rect.height, false)
-      camera.aspect = rect.width / rect.height
-      camera.updateProjectionMatrix()
+      pendingSize = {
+        width: Math.max(1, Math.floor(rect.width)),
+        height: Math.max(1, Math.floor(rect.height)),
+      }
     })
-    resize.observe(canvas)
+    resize.observe(viewport)
   }
 
   function frame(now: number): void {
     if (!frameRequest) return
+    // Canvas writes belong in the animation frame, not ResizeObserver delivery.
+    if (pendingSize) {
+      renderer.setSize(pendingSize.width, pendingSize.height, false)
+      camera.aspect = pendingSize.width / pendingSize.height
+      camera.updateProjectionMatrix()
+      pendingSize = undefined
+    }
     const dt = Math.min((now - previousFrame) / 1000, 0.05)
     previousFrame = now
     if (playing && dt > 0) {

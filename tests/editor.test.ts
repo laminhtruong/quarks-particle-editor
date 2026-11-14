@@ -5,17 +5,20 @@ import { createParticleEditor } from '../src/index'
 import type { ParticleEditor, ParticleEditorOptions } from '../src/index'
 import { parseQuarksDocument } from '../src/document'
 
-const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn() }))
+const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn(), setSize: vi.fn() }))
 vi.mock('three', async (original) => ({
   ...(await original<typeof import('three')>()),
   WebGLRenderer: class {
     setPixelRatio() {}
+    setSize = gpu.setSize
+    render() {}
     dispose = gpu.dispose
   },
 }))
 vi.mock('three/examples/jsm/controls/OrbitControls.js', () => ({
   OrbitControls: class {
     target = { set: vi.fn() }
+    update() {}
     dispose = gpu.controlsDispose
   },
 }))
@@ -68,11 +71,13 @@ class ElementStub {
 const instances: ParticleEditor[] = []
 let browser: ElementStub
 let disconnect: ReturnType<typeof vi.fn>
+let onResize: () => void
 
 beforeEach(() => {
   vi.useFakeTimers()
   gpu.dispose.mockClear()
   gpu.controlsDispose.mockClear()
+  gpu.setSize.mockClear()
   const document = Object.assign(new ElementStub(), {
     baseURI: 'https://example.com/project/',
     createElement: () => new ElementStub(),
@@ -90,6 +95,9 @@ beforeEach(() => {
   vi.stubGlobal(
     'ResizeObserver',
     class {
+      constructor(callback: () => void) {
+        onResize = callback
+      }
       observe() {}
       disconnect = disconnect
     },
@@ -133,6 +141,20 @@ function mount(options?: ParticleEditorOptions) {
 }
 
 describe('project-independent particle editor', () => {
+  it('defers canvas size writes until the animation frame to avoid resize observer loops', async () => {
+    const { editor, root } = mount()
+    await editor.ready
+    Object.assign(root.querySelector('.viewport'), {
+      getBoundingClientRect: () => ({ width: 420.8, height: 300.5 }),
+    })
+    onResize()
+    expect(gpu.setSize).not.toHaveBeenCalled()
+    const frame = vi.mocked(window.requestAnimationFrame).mock.calls[0]![0]
+    frame(0)
+    expect(gpu.setSize).toHaveBeenCalledWith(420, 300, false)
+    frame(0)
+    expect(gpu.setSize).toHaveBeenCalledTimes(1)
+  })
   it('starts empty without assets, project API requests, or a save backend', async () => {
     const { editor, root } = mount()
     await editor.ready

@@ -64,7 +64,7 @@ npm ci
 npm run check
 npm pack
 # From the consuming project:
-npm install /path/to/quarks-particle-editor-0.2.0.tgz three@^0.187.0 three.quarks@^0.17.1
+npm install /path/to/quarks-particle-editor-0.2.1.tgz three@^0.187.0 three.quarks@^0.17.1
 ```
 
 Requires a modern browser with WebGL2 and Shadow DOM. Node.js 22.12+ is needed for
