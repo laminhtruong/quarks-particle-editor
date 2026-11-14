@@ -29,7 +29,8 @@ Only contribute files you have permission to distribute under MIT.
 - Keep UI strings, comments, and documentation in English.
 - Use Conventional Commits, for example `fix: preserve local textures on export`.
 
-`src/index.ts` owns the UI and preview lifecycle, `src/local-files.ts` handles
+`src/index.ts` owns the UI and preview lifecycle, `src/native-properties.ts`
+contains registry-based property forms and native edit validation, `src/local-files.ts` handles
 local texture validation and filename resolution, and `src/document.ts` is the
 engine-free document validation entry point. Styles live in Shadow DOM.
 

@@ -26,11 +26,31 @@ import {
   Vector3 as QVector3,
   Vector4 as QVector4,
   Bezier,
+  BehaviorTypes,
+  MeshSurfaceEmitter,
 } from 'three.quarks'
 import { parseQuarksDocument, textureUrlSchema, type QuarksDocument } from './document.js'
-import { intervalBounds, updateParticlePreview } from './preview.js'
+import { intervalBounds, particlePreviewDuration, updateParticlePreview } from './preview.js'
 import style from './style.css?inline'
 import { readTextureFile, resolveLocalTextures } from './local-files.js'
+import {
+  appendNativeItem,
+  behaviorSlots,
+  generatorTemplates,
+  getNativeValue,
+  nativeNode,
+  newBehavior,
+  newShape,
+  prepareNativeDocument,
+  preserveNativeAssets,
+  propertyLabel,
+  renderProperties,
+  renderProperty,
+  setNativeValue,
+  validateNative,
+  writeBehaviorSlots,
+} from './native-properties.js'
+import type { NativePath, NativeRecord, PropertyContext } from './native-properties.js'
 
 export { parseQuarksDocument, quarksDocumentSchema } from './document.js'
 export type { QuarksDocument } from './document.js'
@@ -118,6 +138,7 @@ export function createParticleEditor(
   </div>
   <input type="file" accept="application/json,.json" hidden data-file-input>
   <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple hidden data-texture-input>
+  <input type="file" accept="application/json,.json" hidden data-geometry-input>
   <div class="toast" role="status" aria-live="polite" hidden></div>
 `
 
@@ -158,6 +179,7 @@ export function createParticleEditor(
   let showGrid = true
   let elapsed = 0
   let previousFrame = 0
+  let previewFailed = false
   let frameRequest = 0
   let toastTimer = 0
   let previewTimer = 0
@@ -171,6 +193,7 @@ export function createParticleEditor(
   let batch: BatchedRenderer
   let grid: THREE.GridHelper
   let resize: ResizeObserver | undefined
+  let depthTarget: THREE.WebGLRenderTarget
   let pendingSize: { width: number; height: number } | undefined
   const undoStack: EffectFile[] = []
   const redoStack: EffectFile[] = []
@@ -406,62 +429,216 @@ export function createParticleEditor(
     }
   }
 
-  function shapeFields(system: ParticleSystem): string {
-    const shape = system.emitterShape
-    const data = shape as unknown as Record<string, unknown>
-    const fields: { key: string; title: string; value: number; step: number }[] = []
-    for (const key of ['radius', 'width', 'height', 'row', 'column', 'donutRadius', 'thickness']) {
-      if (key in shape)
-        fields.push({
-          key,
-          title: key.toUpperCase(),
-          value: Number(data[key]),
-          step: key === 'row' || key === 'column' ? 1 : 0.05,
-        })
+  function propertyContext(json: QuarksDocument): PropertyContext {
+    const resources = (key: string) =>
+      ((json[key] ?? []) as NativeRecord[]).map((item) => ({
+        uuid: String(item.uuid),
+        name: String(item.name || item.type || item.uuid),
+      }))
+    return {
+      emitters: emitterNodes(nativeRoot(json)).map((node) => ({
+        uuid: String(node.uuid),
+        name: node.name || 'Particle System',
+      })),
+      geometries: resources('geometries'),
+      materials: resources('materials'),
+      textures: resources('textures'),
     }
-    if (shape.type === 'cone' || shape.type === 'sphere' || shape.type === 'hemisphere')
-      fields.push({
-        key: 'angle',
-        title: 'ANGLE \u{b7} DEG',
-        value: ((data.angle as number) * 180) / Math.PI,
-        step: 1,
-      })
-    if ('arc' in shape)
-      fields.push({
-        key: 'arc',
-        title: 'ARC \u{b7} DEG',
-        value: ((data.arc as number) * 180) / Math.PI,
-        step: 1,
-      })
-    if ('spread' in shape)
-      fields.push({ key: 'spread', title: 'SPREAD', value: Number(data.spread), step: 0.05 })
-    const controls = fields.map(
-      ({ key, title, value, step }) =>
-        `<label class="field"><span>${title}</span><input type="number" min="0" step="${step}" value="${num(value)}" data-bind="shape.${key}"></label>`,
+  }
+
+  function renderMaterial(json: QuarksDocument, uuid: string, context: PropertyContext): string {
+    const materials = (json.materials ?? []) as NativeRecord[]
+    const index = materials.findIndex((item) => item.uuid === uuid)
+    if (index < 0) return '<p class="hint">No material selected.</p>'
+    const material = materials[index]!
+    return renderProperties(
+      material,
+      Object.keys(material).filter((key) => !['uuid', 'type', 'metadata'].includes(key)),
+      context,
+      ['document', 'materials', index],
     )
-    if ('mode' in shape)
-      controls.push(
-        `<label class="field"><span>EMITTER MODE</span><select data-bind="shape.mode">${[
-          ['0', 'Random'],
-          ['1', 'Loop'],
-          ['2', 'Ping-pong'],
-          ['3', 'Burst'],
-        ]
-          .map(
-            ([value, label]) =>
-              `<option value="${value}" ${String(data.mode) === value ? 'selected' : ''}>${label}</option>`,
-          )
-          .join('')}</select></label>`,
-      )
+  }
+
+  function renderTextureProperties(
+    json: QuarksDocument,
+    materialId: string,
+    context: PropertyContext,
+  ): string {
+    const material = ((json.materials ?? []) as NativeRecord[]).find(
+      (item) => item.uuid === materialId,
+    )
+    const textures = (json.textures ?? []) as NativeRecord[]
+    const indices = textures
+      .map((texture, index) => (Object.values(material ?? {}).includes(texture.uuid) ? index : -1))
+      .filter((index) => index >= 0)
     return (
-      controls.join('') || '<p class="hint">This native emitter shape has no scalar parameters.</p>'
+      indices
+        .map((index) =>
+          renderProperties(
+            textures[index]!,
+            Object.keys(textures[index]!).filter(
+              (key) => !['uuid', 'image', 'metadata'].includes(key),
+            ),
+            context,
+            ['document', 'textures', index],
+          ),
+        )
+        .join('') || '<p class="hint">Assign a texture in Renderer first.</p>'
     )
+  }
+
+  function commitNativeEdit(edit: (node: NativeRecord, json: QuarksDocument) => void): void {
+    const effect = currentEffect()
+    if (!effect || !currentGroup) return
+    try {
+      syncEffect()
+      const next = structuredClone(effect.json)
+      edit(nativeNode(next, systemIndex), next)
+      prepareNativeDocument(next)
+      validateSubEmitters(next)
+      const probe = new QuarksLoader().parse(structuredClone(next))
+      disposeObjects(probe)
+      for (const emitter of emitters(probe)) emitter.system.dispose()
+      recordHistory()
+      releasePreview()
+      effect.json = next
+      markDirty()
+      resetPreview()
+      renderEffects()
+      renderSystems()
+      renderInspector()
+      updateHistoryButtons()
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Invalid Quarks property', true)
+      renderInspector()
+    }
+  }
+
+  function validateSubEmitters(json: QuarksDocument): void {
+    const nodes = emitterNodes(nativeRoot(json))
+    const visiting = new Set<string>(),
+      visited = new Set<string>()
+    const visit = (node: NativeNode) => {
+      const uuid = String(node.uuid)
+      if (visiting.has(uuid)) throw new Error('Sub emitter references cannot form a cycle.')
+      if (visited.has(uuid)) return
+      visiting.add(uuid)
+      for (const behavior of (node.ps?.behaviors ?? []) as NativeRecord[]) {
+        if (behavior.type !== 'EmitSubParticleSystem' || !behavior.subParticleSystem) continue
+        const target = nodes.find((item) => item.uuid === behavior.subParticleSystem)
+        if (!target) throw new Error('Sub emitter must reference an emitter in this effect.')
+        visit(target)
+      }
+      visiting.delete(uuid)
+      visited.add(uuid)
+    }
+    nodes.forEach(visit)
+  }
+
+  function nativeAction(target: HTMLElement): void {
+    const action = target.dataset.nativeAction
+    const path = JSON.parse(target.dataset.nativePath ?? '[]') as NativePath
+    commitNativeEdit((node, json) => {
+      const root = { ...node, document: json }
+      if (action?.startsWith('behavior-')) {
+        const slots = behaviorSlots(node)
+        const index = Number(target.dataset.slot)
+        const slot = slots[index]
+        if (!slot) throw new Error('Select a behavior.')
+        if (action === 'behavior-toggle') slot.enabled = (target as HTMLInputElement).checked
+        else if (action === 'behavior-remove') slots.splice(index, 1)
+        else {
+          const next = index + (action === 'behavior-up' ? -1 : 1)
+          if (next < 0 || next >= slots.length) return
+          ;[slots[index], slots[next]] = [slots[next]!, slots[index]!]
+        }
+        writeBehaviorSlots(node, slots)
+      } else if (action === 'append') appendNativeItem(root, path)
+      else if (action === 'remove') {
+        const array = getNativeValue(root, path.slice(0, -1))
+        if (!Array.isArray(array)) throw new Error('Select a list item.')
+        array.splice(Number(path.at(-1)), 1)
+      } else if (action === 'generator') {
+        const type = (target as HTMLSelectElement).value
+        if (!Object.hasOwn(generatorTemplates, type)) throw new Error('Unsupported generator.')
+        setNativeValue(root, path, generatorTemplates[type]!())
+      } else if (action === 'shape')
+        setNativeValue(root, path, newShape((target as HTMLSelectElement).value))
+      else if (target.dataset.nativeColor) {
+        const colorPath = JSON.parse(target.dataset.nativeColor) as NativePath
+        const color = getNativeValue(root, colorPath) as NativeRecord
+        const rgb = fromHex((target as HTMLInputElement).value)
+        ;['r', 'g', 'b'].forEach((key, index) => {
+          color[key] = rgb[index]
+        })
+      } else {
+        const input = target as HTMLInputElement
+        const value =
+          input.dataset.nativeKind === 'number'
+            ? input.value === ''
+              ? NaN
+              : Number(input.value)
+            : input.dataset.nativeKind === 'boolean'
+              ? input.checked
+              : input.dataset.nativeKind === 'hex'
+                ? Number.parseInt(input.value.slice(1), 16)
+                : input.value
+        setNativeValue(root, path, value)
+        if (
+          path[0] === 'ps' &&
+          path[1] === 'shape' &&
+          ['mesh', 'geometry'].includes(String(path.at(-1)))
+        ) {
+          const shape = (node.ps as NativeRecord).shape as NativeRecord
+          shape.mesh = value
+          shape.geometry = value
+        }
+        if (['pos', 'start'].includes(String(path.at(-1)))) {
+          const array = getNativeValue(root, path.slice(0, -2))
+          const key = String(path.at(-1))
+          if (Array.isArray(array)) array.sort((a, b) => Number(a[key]) - Number(b[key]))
+        }
+        if (path.at(-1) === 'time' && path.includes('emissionBursts')) {
+          const bursts = (node.ps as NativeRecord).emissionBursts as NativeRecord[]
+          bursts.sort((a, b) => Number(a.time) - Number(b.time))
+        }
+        if (path.at(-1) === 'subParticleSystem' && value) {
+          const child = emitterNodes(nativeRoot(json)).find((item) => item.uuid === value)
+          if (child?.ps) child.ps.onlyUsedByOther = true
+        }
+      }
+    })
+  }
+
+  function renderBehaviors(node: NativeRecord, context: PropertyContext): string {
+    let active = 0,
+      disabled = 0
+    const items = behaviorSlots(node)
+      .map((slot, index) => {
+        const prefix: NativePath = slot.enabled
+          ? ['ps', 'behaviors', active++]
+          : ['userData', 'quarksEditorDisabled', disabled++, 'value']
+        return `<details class="behavior-module" open><summary><label><input type="checkbox" data-native-action="behavior-toggle" data-slot="${index}" ${slot.enabled ? 'checked' : ''}> ${esc(propertyLabel(String(slot.value.type)))}</label></summary><fieldset ${slot.enabled ? '' : 'disabled'}>${renderProperties(
+          slot.value,
+          Object.keys(slot.value).filter((key) => key !== 'type'),
+          context,
+          prefix,
+        )}</fieldset><div class="system-actions"><button class="btn small" type="button" data-native-action="behavior-up" data-slot="${index}">Up</button><button class="btn small" type="button" data-native-action="behavior-down" data-slot="${index}">Down</button><button class="btn small danger" type="button" data-native-action="behavior-remove" data-slot="${index}">Remove</button></div></details>`
+      })
+      .join('')
+    return `${items}<label class="field"><span>Add Module</span><select data-add-behavior><option value="">Choose a Quarks behavior...</option>${Object.keys(
+      BehaviorTypes,
+    )
+      .map((type) => `<option value="${esc(type)}">${esc(propertyLabel(type))}</option>`)
+      .join(
+        '',
+      )}</select></label><p class="hint">All registered behaviors, in execution order. Angles use native radians. Disabled modules retain their settings in Object3D userData.</p>`
   }
 
   function renderColorStops(system: ParticleSystem): string {
     const stops = colorStops(system)
     if (!stops && system.behaviors.some((behavior) => behavior.type === 'ColorOverLife'))
-      return '<p class="hint">Native random gradients are preserved. Edit them in Native Quarks JSON.</p>'
+      return '<p class="hint">Edit this color generator in the Behaviors module.</p>'
     if (!stops)
       return '<button class="btn small" type="button" data-action="enable-color">+ Add color over life</button>'
     const colors = stops.colors
@@ -492,16 +669,12 @@ export function createParticleEditor(
         '<div class="panel-tab">Inspector</div><div class="empty-list">Select or create a Quarks effect.<br><br>Open JSON to edit a local file, or import textures and create a new effect. No account or backend required.</div>'
       return
     }
-    const life = intervalBounds(system.startLife, [1, 1])
-    const speed = intervalBounds(system.startSpeed, [0, 0])
-    const size = intervalBounds(system.startSize, [1, 1])
-    const rotation = intervalBounds(system.startRotation, [0, 0])
-    const color = colorOf(system)
-    const constantStartColor = system.startColor instanceof ConstantColor
+    syncEffect()
+    const node = nativeNode(effect.json, systemIndex)
+    const ps = node.ps as NativeRecord
+    const context = propertyContext(effect.json)
     const material = materialOf(system)
     const effectRotation = rootRotation(effect)
-    const burst = system.emissionBursts[0]
-    const burstCount = burst ? intervalBounds(burst.count, [0, 0])[1] : 0
     const curve = sizeCurve(system)
     const modes = [
       [RenderMode.BillBoard, 'Billboard'],
@@ -519,50 +692,29 @@ export function createParticleEditor(
             `<option value="${esc(name)}" ${name === material.name ? 'selected' : ''}>${esc(name)}</option>`,
         )
         .join('')
-    const shapeKinds = [
-      'point',
-      'cone',
-      'sphere',
-      'hemisphere',
-      'circle',
-      'donut',
-      'rectangle',
-      'grid',
-    ]
     const markup = `
     <div class="panel-tab">Inspector</div><header class="inspector-head"><div class="inspector-kicker">Particle System</div><input class="inspector-title" value="${esc(displayName(effect))}" aria-label="Effect name" data-bind="effect.name"><div class="inspector-sub">${esc(emitter.name || `Particle System ${systemIndex + 1}`)} <span>\u{b7}</span> ${esc(effect.id)}</div></header>
     <section class="inspect-section"><h3>Transform</h3><div class="field-grid">
       <label class="field"><span>Rotation X (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.x * 180) / Math.PI)}" data-bind="effect.rotation.x"></label>
       <label class="field"><span>Rotation Y (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.y * 180) / Math.PI)}" data-bind="effect.rotation.y"></label>
       <label class="field"><span>Rotation Z (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.z * 180) / Math.PI)}" data-bind="effect.rotation.z"></label>
+      ${(['position', 'scale'] as const).map((property) => (['x', 'y', 'z'] as const).map((axis) => `<label class="field"><span>Root ${propertyLabel(property)} ${axis.toUpperCase()}</span><input type="number" step="any" value="${num(currentGroup![property][axis])}" data-bind="effect.${property}.${axis}"></label>`).join('')).join('')}
+      ${(['position', 'rotation', 'scale'] as const).map((property) => (['x', 'y', 'z'] as const).map((axis) => `<label class="field"><span>Emitter ${propertyLabel(property)} ${axis.toUpperCase()}${property === 'rotation' ? ' (rad)' : ''}</span><input type="number" step="any" value="${num(emitter[property][axis])}" data-bind="emitter.${property}.${axis}"></label>`).join('')).join('')}
     </div><p class="hint">Rotates the native root Group and all its emitters. Angles are degrees.</p></section>
     <section class="inspect-section"><h3>Main</h3><div class="field-grid">
       <label class="field"><span>Duration (s)</span><input type="number" min="0.01" step="0.05" value="${num(system.duration)}" data-bind="duration"></label>
-      <label class="field"><span>Start Lifetime Min</span><input type="number" min="0.01" step="0.05" value="${num(life[0])}" data-bind="life.0"></label>
-      <label class="field"><span>Start Lifetime Max</span><input type="number" min="0.01" step="0.05" value="${num(life[1])}" data-bind="life.1"></label>
       <label class="check-field"><input type="checkbox" ${system.looping ? 'checked' : ''} data-bind="looping"> Looping</label>
       <label class="field"><span>Simulation Space</span><select data-bind="worldSpace"><option value="false" ${system.worldSpace ? '' : 'selected'}>Local</option><option value="true" ${system.worldSpace ? 'selected' : ''}>World</option></select></label>
       <label class="check-field"><input type="checkbox" ${system.prewarm ? 'checked' : ''} data-bind="prewarm"> Prewarm</label>
       <label class="check-field"><input type="checkbox" ${system.autoDestroy ? 'checked' : ''} data-bind="autoDestroy"> Auto destroy</label>
-      <label class="field"><span>Start Speed Min</span><input type="number" min="0" step="0.5" value="${num(speed[0])}" data-bind="speed.0"></label>
-      <label class="field"><span>Start Speed Max</span><input type="number" min="0" step="0.5" value="${num(speed[1])}" data-bind="speed.1"></label>
-      <label class="field"><span>Start Size Min</span><input type="number" min="0.01" step="0.05" value="${num(size[0])}" data-bind="size.0"></label>
-      <label class="field"><span>Start Size Max</span><input type="number" min="0.01" step="0.05" value="${num(size[1])}" data-bind="size.1"></label>
-      <label class="field"><span>Start Rotation Min (deg)</span><input type="number" step="5" value="${num((rotation[0] * 180) / Math.PI)}" data-bind="rotation.0"></label>
-      <label class="field"><span>Start Rotation Max (deg)</span><input type="number" step="5" value="${num((rotation[1] * 180) / Math.PI)}" data-bind="rotation.1"></label>
+      ${renderProperties(ps, ['startLife', 'startSpeed', 'startSize', 'startRotation', 'startColor', 'onlyUsedByOther'], context)}
       <label class="field"><span>Gravity Y</span><input type="number" step="0.5" value="${num(gravityOf(system))}" data-bind="gravity"></label>
-      <label class="field"><span>Start Color</span><input type="color" value="${asHex(color)}" data-bind="startColor" ${constantStartColor ? '' : 'disabled title="Edit native random colors in Native Quarks JSON"'}></label>
-      <label class="field"><span>Start Alpha</span><input type="number" min="0" max="1" step="0.05" value="${num(color[3])}" data-bind="startAlpha" ${constantStartColor ? '' : 'disabled title="Edit native random colors in Native Quarks JSON"'}></label>
     </div></section>
     <section class="inspect-section"><h3>Emission</h3><div class="field-grid">
-      <label class="field"><span>Rate over Time</span><input type="number" min="0" step="1" value="${num(intervalBounds(system.emissionOverTime, [0, 0])[1])}" data-bind="rate"></label>
-      <label class="field"><span>Rate over Distance</span><input type="number" min="0" step="0.1" value="${num(intervalBounds(system.emissionOverDistance, [0, 0])[1])}" data-bind="distanceRate"></label>
-      <label class="field"><span>Burst Count</span><input type="number" min="0" step="1" value="${num(burstCount)}" data-bind="burst.count"></label>
-      <label class="field"><span>Burst Time (s)</span><input type="number" min="0" step="0.05" value="${num(burst?.time ?? 0)}" data-bind="burst.time"></label>
-    </div><p class="hint">Edits the first burst. Additional authored bursts are preserved in JSON.</p></section>
+      ${renderProperties(ps, ['emissionOverTime', 'emissionOverDistance', 'emissionBursts'], context)}
+    </div></section>
     <section class="inspect-section"><h3>Shape</h3><div class="field-grid">
-      <label class="field"><span>Shape</span><select data-bind="shape.kind">${shapeKinds.map((kind) => `<option value="${kind}" ${system.emitterShape.type === kind ? 'selected' : ''}>${kind}</option>`).join('')}</select></label>
-      ${shapeFields(system)}
+      ${renderProperty(ps.shape, ['ps', 'shape'], context)}<p class="hint">Native angles are radians. Mesh surface requires indexed geometry.</p>
     </div></section>
     <section class="inspect-section"><h3>Renderer</h3><div class="field-grid">
       <label class="field full"><span>Texture</span><select data-bind="material">${textureOptions}</select></label>
@@ -570,10 +722,15 @@ export function createParticleEditor(
       <div class="field full">${textures.has(material.name) ? `<img class="asset-preview" src="${esc(textures.get(material.name)!)}" alt="${esc(material.name)} texture">` : '<span class="hint">Embedded texture or no project texture selected</span>'}</div>
       <label class="field full"><span>Render Mode</span><select data-bind="renderMode">${modes.map(([mode, label]) => `<option value="${mode}" ${system.renderMode === mode ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
       <label class="field"><span>Blending</span><select data-bind="additive"><option value="true" ${material.additive ? 'selected' : ''}>Additive</option><option value="false" ${material.additive ? '' : 'selected'}>Alpha</option></select></label>
-    </div><p class="hint">These controls update a live Quarks ParticleSystem, not an editor-specific particle schema.</p></section>
+      ${renderProperties(ps, ['material', 'instancingGeometry', 'rendererEmitterSettings', 'renderOrder', 'layers', 'softParticles', 'softNearFade', 'softFarFade'], context)}
+      <label class="field"><span>New Geometry</span><select data-geometry-kind>${['Box', 'Sphere', 'Plane', 'Cone', 'Cylinder', 'Torus', 'Icosahedron'].map((type) => `<option>${type}</option>`).join('')}</select></label><button class="btn small" type="button" data-action="add-geometry">+ Geometry</button><button class="btn small" type="button" data-action="import-geometry">Browse Geometry JSON</button>
+    </div><p class="hint">Soft particles use the preview depth pass. Your game must also supply a depth texture to BatchedRenderer.</p></section>
+    <section class="inspect-section"><h3>Material Properties</h3>${renderMaterial(effect.json, String(ps.material), context)}</section>
+    <section class="inspect-section"><h3>Texture Properties</h3>${renderTextureProperties(effect.json, String(ps.material), context)}</section>
+    <section class="inspect-section"><h3>Behaviors</h3>${renderBehaviors(node, context)}</section>
     <section class="inspect-section"><h3>Size over lifetime</h3>${curve ? '<div class="curve-box"><svg viewBox="0 0 100 100" preserveAspectRatio="none" data-curve></svg><span class="curve-label">0 \u{2192} LIFE \u{2192} 100%</span></div><div class="curve-tools"><span>Quarks PiecewiseBezier</span><div><button class="btn" type="button" data-action="add-curve-key">+ Key</button> <button class="btn" type="button" data-action="remove-curve-key">- Key</button></div></div>' : '<button class="btn small" type="button" data-action="enable-curve">+ Add SizeOverLife</button>'}</section>
     <section class="inspect-section"><h3>Color over lifetime</h3>${renderColorStops(system)}</section>
-    <section class="inspect-section"><h3>Texture sheet</h3><div class="field-grid"><label class="field"><span>TILE X</span><input type="number" min="1" step="1" value="${system.uTileCount}" data-bind="uTileCount"></label><label class="field"><span>TILE Y</span><input type="number" min="1" step="1" value="${system.vTileCount}" data-bind="vTileCount"></label><label class="field"><span>START TILE</span><input type="number" min="0" step="1" value="${intervalBounds(system.startTileIndex, [0, 0])[1]}" data-bind="startTileIndex"></label><label class="check-field"><input type="checkbox" ${system.blendTiles ? 'checked' : ''} data-bind="blendTiles"> Blend frames</label>${frameRange(system) ? `<label class="field"><span>FRAME START</span><input type="number" step="1" value="${num(frameRange(system)![0])}" data-bind="frame.start"></label><label class="field"><span>FRAME END</span><input type="number" step="1" value="${num(frameRange(system)![1])}" data-bind="frame.end"></label>` : '<button class="btn small" type="button" data-action="enable-frame">+ Add FrameOverLife</button>'}</div><p class="hint">Animation uses Quarks' native FrameOverLife behavior.</p></section>
+    <section class="inspect-section"><h3>Texture sheet</h3>${renderProperties(ps, ['uTileCount', 'vTileCount', 'startTileIndex', 'blendTiles'], context)}<p class="hint">Add Frame Over Life in Behaviors to animate frames.</p></section>
     <section class="inspect-section"><details class="native-json"><summary>Native Quarks JSON</summary><textarea spellcheck="false" aria-label="Native Quarks JSON" data-native-json>${esc(JSON.stringify(effect.json, null, 2))}</textarea><button class="btn small" type="button" data-action="apply-json">Apply document</button></details></section>
     <section class="inspect-section"><button class="btn danger small" type="button" data-action="delete-effect" ${isBuiltIn(effect.id) || (savedIds.has(effect.id) && !options.deleteEffect) ? 'disabled' : ''}>Delete effect</button>${isBuiltIn(effect.id) && options.deleteEffect ? '<button class="btn small" type="button" data-action="reset-effect">Reset to project default</button>' : ''}</section>`
     inspector.innerHTML = markup.replace(
@@ -593,6 +750,39 @@ export function createParticleEditor(
           )
           .join('')
       : '<p class="empty-list">No textures. Browse or drop PNG, JPEG, WebP, or GIF files.</p>'
+  }
+
+  function addGeometry(geometry: THREE.BufferGeometry): void {
+    try {
+      const position = geometry.getAttribute('position')
+      if (
+        !position ||
+        !position.count ||
+        position.count > 1_000_000 ||
+        !Array.from(position.array).every(Number.isFinite)
+      )
+        throw new Error('Geometry needs finite positions and at most one million vertices.')
+      if (!geometry.index)
+        geometry.setIndex(Array.from({ length: position.count }, (_, index) => index))
+      if (
+        !Array.from(geometry.index!.array).every(
+          (index) => Number.isInteger(index) && index >= 0 && index < position.count,
+        )
+      )
+        throw new Error('Geometry has invalid indices.')
+      commitNativeEdit((node, json) => {
+        const geometries = (json.geometries ??= []) as NativeRecord[]
+        geometries.push(geometry.toJSON() as unknown as NativeRecord)
+        const ps = node.ps as NativeRecord
+        if ((ps.shape as NativeRecord).type === 'mesh_surface')
+          ps.shape = { type: 'mesh_surface', geometry: geometry.uuid, mesh: geometry.uuid }
+        else ps.instancingGeometry = geometry.uuid
+      })
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Could not import geometry', true)
+    } finally {
+      geometry.dispose()
+    }
   }
 
   async function importTextures(files: readonly File[]): Promise<void> {
@@ -702,7 +892,33 @@ export function createParticleEditor(
     const urls = new Map<string, string>()
     group.traverse((object) => {
       if (object.type !== 'ParticleEmitter' || !('system' in object)) return
-      const material = (object as EmitterObject).system.material as THREE.MeshBasicMaterial
+      const system = (object as EmitterObject).system
+      const material = system.material as THREE.MeshBasicMaterial
+      const materialJson = ((json.materials ?? []) as NativeRecord[]).find(
+        (item) => item.uuid === material.uuid,
+      )
+      if (materialJson)
+        for (const key of [
+          'opacity',
+          'transparent',
+          'depthWrite',
+          'depthTest',
+          'alphaTest',
+          'side',
+          'blending',
+          'colorWrite',
+          'toneMapped',
+        ] as const)
+          materialJson[key] = material[key]
+      if (system.emitterShape instanceof MeshSurfaceEmitter && system.emitterShape.geometry) {
+        const geometry = system.emitterShape.geometry
+        const geometries = (json.geometries ??= []) as NativeRecord[]
+        if (!geometries.some((item) => item.uuid === geometry.uuid))
+          geometries.push(geometry.toJSON() as unknown as NativeRecord)
+        const node = emitterNodes(nativeRoot(json)).find((node) => node.uuid === object.uuid)
+        if (node?.ps)
+          node.ps.shape = { type: 'mesh_surface', mesh: geometry.uuid, geometry: geometry.uuid }
+      }
       const texture = material.map
       const source = texture?.image as { src?: string } | undefined
       if (!texture) return
@@ -723,6 +939,8 @@ export function createParticleEditor(
       const url = urlsByImage.get(image.uuid)
       if (url) image.url = url
     }
+    const previous = group === currentGroup ? currentEffect()?.json : undefined
+    if (previous) preserveNativeAssets(previous, json)
     return parseQuarksDocument(json)
   }
 
@@ -738,6 +956,7 @@ export function createParticleEditor(
   }
 
   function resetPreview(): void {
+    previewFailed = false
     syncEffect()
     releasePreview()
     if (batch) {
@@ -745,6 +964,7 @@ export function createParticleEditor(
       disposeObjects(batch)
     }
     batch = new BatchedRenderer()
+    batch.setDepthTexture(depthTarget?.depthTexture ?? null)
     scene.add(batch)
     const effect = currentEffect()
     if (effect) {
@@ -753,7 +973,7 @@ export function createParticleEditor(
       scene.add(currentGroup)
       QuarksUtil.addToBatchRenderer(currentGroup, batch)
       previewSystems = emitters(currentGroup).map((emitter) => emitter.system)
-      previewDuration = Math.max(0.25, ...previewSystems.map((system) => system.duration))
+      previewDuration = particlePreviewDuration(previewSystems)
     }
     elapsed = 0
     renderTransport()
@@ -794,9 +1014,12 @@ export function createParticleEditor(
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
+    depthTarget = new THREE.WebGLRenderTarget(1, 1)
+    depthTarget.depthTexture = new THREE.DepthTexture(1, 1)
     scene = new THREE.Scene()
     scene.background = new THREE.Color('#282828')
     camera = new THREE.PerspectiveCamera(43, 1, 0.1, 150)
+    camera.layers.enableAll()
     camera.position.set(8, 6, 10)
     controls = new OrbitControls(camera, canvas)
     controls.enableDamping = true
@@ -831,11 +1054,43 @@ export function createParticleEditor(
     resize.observe(viewport)
   }
 
+  function pauseBrokenPreview(error: unknown): void {
+    playing = false
+    previewFailed = true
+    flash(
+      `Preview paused: ${error instanceof Error ? error.message : 'incompatible Quarks settings'}. Edit the modules or restart to retry.`,
+      true,
+    )
+    renderTransport()
+  }
+
+  function simulate(delta: number): boolean {
+    if (previewFailed) return false
+    try {
+      updateParticlePreview(batch, previewSystems, delta)
+      return true
+    } catch (error) {
+      pauseBrokenPreview(error)
+      return false
+    }
+  }
+
   function frame(now: number): void {
     if (!frameRequest) return
+    try {
+      drawFrame(now)
+    } catch (error) {
+      pauseBrokenPreview(error)
+    }
+    frameRequest = window.requestAnimationFrame(frame)
+  }
+
+  function drawFrame(now: number): void {
+    if (previewFailed) return
     // Canvas writes belong in the animation frame, not ResizeObserver delivery.
     if (pendingSize) {
       renderer.setSize(pendingSize.width, pendingSize.height, false)
+      depthTarget.setSize(pendingSize.width, pendingSize.height)
       camera.aspect = pendingSize.width / pendingSize.height
       camera.updateProjectionMatrix()
       pendingSize = undefined
@@ -843,10 +1098,11 @@ export function createParticleEditor(
     const dt = Math.min((now - previousFrame) / 1000, 0.05)
     previousFrame = now
     if (playing && dt > 0) {
-      updateParticlePreview(batch, previewSystems, dt)
+      if (!simulate(dt)) return
       elapsed += dt
       if (elapsed >= previewDuration) {
-        if (previewSystems.some((system) => system.looping)) elapsed %= previewDuration
+        if (previewSystems.some((system) => system.looping && !system.onlyUsedByOther))
+          elapsed %= previewDuration
         else {
           elapsed = previewDuration
           playing = false
@@ -855,8 +1111,18 @@ export function createParticleEditor(
       renderTransport()
     }
     controls.update()
+    if (previewSystems.some((system) => system.softParticles)) {
+      const visible = batch.visible
+      batch.visible = false
+      renderer.setRenderTarget(depthTarget)
+      try {
+        renderer.render(scene, camera)
+      } finally {
+        renderer.setRenderTarget(null)
+        batch.visible = visible
+      }
+    }
     renderer.render(scene, camera)
-    frameRequest = window.requestAnimationFrame(frame)
   }
 
   function startAnimation(): void {
@@ -920,6 +1186,13 @@ export function createParticleEditor(
             : target instanceof HTMLInputElement && target.type === 'number'
               ? Number(target.value)
               : target.value
+    if (
+      typeof value === 'number' &&
+      (!Number.isFinite(value) || (bind === 'duration' && value <= 0))
+    ) {
+      flash('Enter a finite number; duration must be positive.', true)
+      return
+    }
     if (bind === 'effect.name') {
       const name = String(value).trim() || effect.id
       currentGroup!.name = name
@@ -927,6 +1200,16 @@ export function createParticleEditor(
     } else if (bind.startsWith('effect.rotation.')) {
       const axis = bind.at(-1) as 'x' | 'y' | 'z'
       currentGroup!.rotation[axis] = (Number(value) * Math.PI) / 180
+    } else if (bind.startsWith('emitter.')) {
+      const [, property, axis] = bind.split('.') as [
+        string,
+        'position' | 'rotation' | 'scale',
+        'x' | 'y' | 'z',
+      ]
+      currentEmitter()![property][axis] = Number(value)
+    } else if (bind.startsWith('effect.position.') || bind.startsWith('effect.scale.')) {
+      const [, property, axis] = bind.split('.') as [string, 'position' | 'scale', 'x' | 'y' | 'z']
+      currentGroup![property][axis] = Number(value)
     } else if (bind === 'duration') system.duration = Number(value)
     else if (bind === 'looping') system.looping = Boolean(value)
     else if (bind === 'worldSpace') system.worldSpace = Boolean(value)
@@ -1003,8 +1286,19 @@ export function createParticleEditor(
           ),
         )
       }
-    } else if (bind === 'renderMode') system.renderMode = Number(value) as RenderMode
-    else if (bind === 'additive' || bind === 'material') {
+    } else if (bind === 'renderMode') {
+      commitNativeEdit((node) => {
+        const ps = node.ps as NativeRecord
+        ps.renderMode = Number(value)
+        ps.rendererEmitterSettings =
+          Number(value) === RenderMode.Trail
+            ? { startLength: { type: 'ConstantValue', value: 30 }, followLocalOrigin: false }
+            : Number(value) === RenderMode.StretchedBillBoard
+              ? { speedFactor: 1, lengthFactor: 1 }
+              : {}
+      })
+      return
+    } else if (bind === 'additive' || bind === 'material') {
       const old = system.material as THREE.MeshBasicMaterial
       if (bind === 'material') {
         system.material = createMaterial(String(value), old.blending === THREE.AdditiveBlending)
@@ -1209,6 +1503,8 @@ export function createParticleEditor(
         if (destroyed) return
         const json = parseQuarksDocument(JSON.parse(text))
         resolveLocalTextures(json, textures)
+        prepareNativeDocument(json)
+        validateSubEmitters(json)
         // Validate runtime compatibility before replacing any in-session document.
         const probe = new QuarksLoader().parse(structuredClone(json))
         disposeObjects(probe)
@@ -1257,10 +1553,34 @@ export function createParticleEditor(
     'click',
     (event) => {
       const target = (event.target as HTMLElement).closest<HTMLElement>(
-        '[data-action], [data-effect], [data-system], [data-texture]',
+        '[data-action], [data-effect], [data-system], [data-texture], [data-native-action]',
       )
       if (!target) return
       const action = target.dataset.action
+      if (target.dataset.nativeAction) {
+        if (target.tagName === 'BUTTON') nativeAction(target)
+        return
+      }
+      if (action === 'add-geometry') {
+        const types = {
+          Box: THREE.BoxGeometry,
+          Sphere: THREE.SphereGeometry,
+          Plane: THREE.PlaneGeometry,
+          Cone: THREE.ConeGeometry,
+          Cylinder: THREE.CylinderGeometry,
+          Torus: THREE.TorusGeometry,
+          Icosahedron: THREE.IcosahedronGeometry,
+        }
+        const kind = $<HTMLSelectElement>('[data-geometry-kind]').value as keyof typeof types
+        addGeometry(new types[kind]())
+        return
+      }
+      if (action === 'import-geometry') {
+        const input = $<HTMLInputElement>('[data-geometry-input]')
+        input.value = ''
+        input.click()
+        return
+      }
       if (target.dataset.texture) {
         assignTexture(target.dataset.texture)
         return
@@ -1329,6 +1649,18 @@ export function createParticleEditor(
       } else if (action === 'remove-system') {
         const emitter = currentEmitter()
         if (!emitter || emitters().length <= 1) return
+        syncEffect()
+        const effect = currentEffect()!
+        const removed = new Set<string>()
+        emitter.traverse((child) => removed.add(child.uuid))
+        if (
+          emitterNodes(nativeRoot(effect.json)).some((node) =>
+            behaviorSlots(node).some((slot) => removed.has(String(slot.value.subParticleSystem))),
+          )
+        ) {
+          flash('Remove sub emitter references to this system before deleting it.', true)
+          return
+        }
         recordHistory()
         emitter.system.dispose()
         emitter.parent?.remove(emitter)
@@ -1363,8 +1695,7 @@ export function createParticleEditor(
         drawTransport()
       } else if (action === 'step') {
         playing = false
-        updateParticlePreview(batch, previewSystems, 1 / 30)
-        elapsed = Math.min(previewDuration, elapsed + 1 / 30)
+        if (simulate(1 / 30)) elapsed = Math.min(previewDuration, elapsed + 1 / 30)
         drawTransport()
       } else if (action === 'frame') {
         controls.target.set(0, 1, 0)
@@ -1428,6 +1759,11 @@ export function createParticleEditor(
         if (!effect) return
         try {
           const json = parseQuarksDocument(JSON.parse(input.value))
+          prepareNativeDocument(json)
+          validateSubEmitters(json)
+          const probe = new QuarksLoader().parse(structuredClone(json))
+          disposeObjects(probe)
+          for (const emitter of emitters(probe)) emitter.system.dispose()
           recordHistory()
           releasePreview()
           effect.json = json
@@ -1598,8 +1934,9 @@ export function createParticleEditor(
           playing = false
           const next = (Number(target.value) / 1000) * previewDuration
           resetPreview()
-          for (let i = 0; i < Math.ceil(next * 60); i++)
-            updateParticlePreview(batch, previewSystems, Math.min(1 / 60, next - i / 60))
+          for (let i = 0; i < Math.ceil(next * 60); i++) {
+            if (!simulate(Math.min(1 / 60, next - i / 60))) break
+          }
           elapsed = next
           drawTransport()
         } else if (target.matches('[data-search]')) renderEffects()
@@ -1611,6 +1948,21 @@ export function createParticleEditor(
   root.addEventListener(
     'change',
     (event) => {
+      const target = event.target as HTMLInputElement
+      if (target.dataset.addBehavior !== undefined && target.value) {
+        const system = currentEmitter()?.system
+        if (system)
+          commitNativeEdit((node) => {
+            const slots = behaviorSlots(node)
+            slots.push({ enabled: true, value: newBehavior(target.value, system) })
+            writeBehaviorSlots(node, slots)
+          })
+        return
+      }
+      if (target.dataset.nativePath || target.dataset.nativeColor || target.dataset.nativeAction) {
+        nativeAction(target)
+        return
+      }
       if (event.target instanceof HTMLSelectElement && event.target.dataset.bind) renderInspector()
     },
     { signal: events.signal },
@@ -1644,6 +1996,37 @@ export function createParticleEditor(
     (event) => {
       const file = (event.target as HTMLInputElement).files?.[0]
       if (file) void importFile(file)
+    },
+    { signal: events.signal },
+  )
+
+  $<HTMLInputElement>('[data-geometry-input]').addEventListener(
+    'change',
+    (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0]
+      if (!file) return
+      if (file.size > 64 * 1024 * 1024) {
+        flash('Geometry JSON must not exceed 64 MB.', true)
+        return
+      }
+      void file
+        .text()
+        .then((text) => {
+          if (destroyed) return
+          const value = JSON.parse(text) as NativeRecord
+          const source = (
+            Array.isArray(value.geometries) ? value.geometries[0] : value
+          ) as NativeRecord
+          validateNative(source)
+          const geometries = new THREE.ObjectLoader().parseGeometries([source])
+          const geometry = Object.values(geometries)[0]
+          if (!geometry) throw new Error('Choose a Three.js geometry JSON document.')
+          addGeometry(geometry)
+        })
+        .catch((error: unknown) => {
+          if (!destroyed)
+            flash(error instanceof Error ? error.message : 'Invalid geometry JSON', true)
+        })
     },
     { signal: events.signal },
   )
@@ -1741,9 +2124,15 @@ export function createParticleEditor(
       }
       for (const saved of stored) {
         if (savedIds.has(saved.id)) throw new Error(`Duplicate effect id: ${saved.id}`)
-        const json = parseQuarksDocument(saved.json)
-        if (saved.defaultJson)
-          defaults.set(saved.id, { id: saved.id, json: parseQuarksDocument(saved.defaultJson) })
+        const json = parseQuarksDocument(structuredClone(saved.json))
+        prepareNativeDocument(json)
+        validateSubEmitters(json)
+        if (saved.defaultJson) {
+          const json = parseQuarksDocument(structuredClone(saved.defaultJson))
+          prepareNativeDocument(json)
+          validateSubEmitters(json)
+          defaults.set(saved.id, { id: saved.id, json })
+        }
         const effect = { id: saved.id, json }
         effects.push(structuredClone(effect))
         savedEffects.set(saved.id, structuredClone(effect))
@@ -1795,6 +2184,7 @@ export function createParticleEditor(
       if (scene) disposeObjects(scene)
       controls?.dispose()
       renderer?.dispose()
+      depthTarget?.dispose()
       host.remove()
     },
   }

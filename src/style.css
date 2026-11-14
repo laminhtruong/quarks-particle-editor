@@ -598,6 +598,68 @@ button.hierarchy-row:hover {
 .native-json summary {
   font-size: 11px;
 }
+.native-group {
+  min-width: 0;
+  margin: 6px 0;
+  padding: 7px;
+  border: 1px solid #505050;
+}
+.native-group legend {
+  padding: 0 4px;
+  color: #c5c5c5;
+  font-size: 11px;
+}
+.native-group .field {
+  margin: 3px 0;
+  grid-template-columns: minmax(75px, 44%) minmax(0, 1fr);
+}
+.native-group input[type='text'] {
+  width: 100%;
+  min-width: 0;
+}
+.native-array-item + .native-array-item {
+  border-top: 1px solid #555;
+  margin-top: 6px;
+  padding-top: 4px;
+}
+.native-curve {
+  display: block;
+  width: 100%;
+  height: 90px;
+  background: #262626;
+  border: 1px solid #222;
+}
+.native-curve polyline {
+  fill: none;
+  stroke: #82d17a;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.native-gradient {
+  height: 20px;
+  border: 1px solid #222;
+  margin: 5px 0;
+}
+.behavior-module {
+  margin-bottom: 8px;
+  border: 1px solid #555;
+  padding: 5px;
+}
+.behavior-module > summary {
+  font-size: 12px;
+  padding: 3px;
+}
+.behavior-module > summary label {
+  cursor: pointer;
+}
+.behavior-module > fieldset {
+  border: 0;
+  min-width: 0;
+  padding: 4px 0;
+}
+.behavior-module > fieldset:disabled {
+  opacity: 0.45;
+}
 .native-json textarea {
   width: 100%;
   min-height: 180px;

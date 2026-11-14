@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataTexture, Group, MeshBasicMaterial } from 'three'
-import { ParticleSystem } from 'three.quarks'
+import { BatchedRenderer, ParticleSystem } from 'three.quarks'
 import { createParticleEditor } from '../src/index'
 import type { ParticleEditor, ParticleEditorOptions } from '../src/index'
 import { parseQuarksDocument } from '../src/document'
@@ -141,6 +141,62 @@ function mount(options?: ParticleEditorOptions) {
 }
 
 describe('project-independent particle editor', () => {
+  it('keeps the inspector usable when a native simulation throws', async () => {
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    vi.spyOn(BatchedRenderer.prototype, 'update').mockImplementationOnce(() => {
+      throw new Error('Native behavior failed')
+    })
+    vi.mocked(window.requestAnimationFrame).mock.calls[0]![0](performance.now() + 16)
+    expect(root.querySelector('.toast').textContent).toContain(
+      'Preview paused: Native behavior failed',
+    )
+    expect(window.requestAnimationFrame).toHaveBeenCalledTimes(2)
+    click('duplicate-system')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+  })
+  it('commits a native generator edit with undo and rejects invalid edits without data loss', async () => {
+    const saveEffect = vi.fn(async (_id: string, _json: unknown) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    const change = (dataset: Record<string, string>, value: string) =>
+      root.listeners.get('change')?.({ target: { dataset, value } })
+    change({ nativeAction: 'generator', nativePath: '["ps","startSize"]' }, 'Vector3Function')
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    expect(JSON.stringify(saveEffect.mock.calls[0]![1])).toContain('Vector3Function')
+    click('undo')
+    expect(root.querySelector('[data-inspector]').innerHTML).not.toContain(
+      'value="Vector3Function" selected',
+    )
+    change({ nativePath: '["ps","duration"]', nativeKind: 'number' }, '-1')
+    expect(root.querySelector('.toast').textContent).toContain('must be positive')
+  })
+
+  it('adds, disables, and restores a registered behavior through the inspector', async () => {
+    const saveEffect = vi.fn(async (_id: string, _json: unknown) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    root.listeners.get('change')?.({ target: { dataset: { addBehavior: '' }, value: 'Noise' } })
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Frequency')
+    root.listeners.get('change')?.({
+      target: { dataset: { nativeAction: 'behavior-toggle', slot: '0' }, checked: false },
+    })
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const saved = saveEffect.mock.calls[0]![1] as {
+      object: { children: { ps: { behaviors: unknown[] }; userData: Record<string, unknown> }[] }
+    }
+    expect(saved.object.children[0]!.ps.behaviors).toHaveLength(0)
+    expect(saved.object.children[0]!.userData.quarksEditorDisabled).toEqual([
+      expect.objectContaining({ value: expect.objectContaining({ type: 'Noise' }) }),
+    ])
+    root.listeners.get('change')?.({
+      target: { dataset: { nativeAction: 'behavior-toggle', slot: '0' }, checked: true },
+    })
+    expect(root.querySelector('[data-inspector]').innerHTML).not.toContain('<fieldset disabled>')
+  })
+
   it('defers canvas size writes until the animation frame to avoid resize observer loops', async () => {
     const { editor, root } = mount()
     await editor.ready

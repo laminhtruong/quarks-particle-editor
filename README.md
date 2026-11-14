@@ -49,10 +49,16 @@ Raster files are limited to 16 MB / 8192 pixels per dimension; JSON to 64 MB.
 
 This is **Unity-inspired, not a Unity clone or compatibility layer**. It edits
 Quarks behavior only: no fake Unity modules, Unity asset importer, or copied
-Unity artwork. Complex native properties remain available through the JSON
-editor. Burst controls edit the first burst; additional bursts are preserved.
-Curve editing supports the existing Quarks piecewise Bezier representation,
-not Unity's full MinMaxCurve/gradient authoring feature set.
+Unity artwork. The inspector exposes all **19 registered behaviors**, **9 registered
+shapes**, **12 generator modes**, and **6 render modes** in `three.quarks` 0.17.1.
+There are forms for native cubic curve controls, gradient/color/alpha keys,
+multiple bursts, vectors, rotations, renderer settings, materials, and textures.
+The two quick lifetime editors are optional visual shortcuts; the native forms
+in **Behaviors** preserve the complete generators, including cubic control values.
+
+See the [Quarks support matrix](docs/quarks-support.md) for the exact scope and
+upstream limitations. This is complete authoring of the stock loader's registered
+JSON features, not an implementation of runtime-only host callbacks or Unity APIs.
 
 ## Install
 
@@ -64,7 +70,7 @@ npm ci
 npm run check
 npm pack
 # From the consuming project:
-npm install /path/to/quarks-particle-editor-0.2.1.tgz three@^0.187.0 three.quarks@^0.17.1
+npm install /path/to/quarks-particle-editor-0.3.0.tgz three@^0.187.0 three.quarks@^0.17.1
 ```
 
 Requires a modern browser with WebGL2 and Shadow DOM. Node.js 22.12+ is needed for
