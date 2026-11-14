@@ -1,0 +1,51 @@
+{
+  "name": "quarks-particle-editor",
+  "version": "0.1.0",
+  "description": "An embeddable, framework-independent Three.js Quarks particle editor with project-owned data.",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/quarks-particle-editor.js"
+    },
+    "./document": {
+      "types": "./dist/document.d.ts",
+      "import": "./dist/document.js"
+    }
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm run format:check && npm test && npm run build",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "three": "^0.187.0",
+    "three.quarks": "^0.17.1"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/three": "^0.187.0",
+    "prettier": "^3.10.1",
+    "three": "^0.187.0",
+    "three.quarks": "^0.17.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

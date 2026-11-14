@@ -1,0 +1,361 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DataTexture, Group, MeshBasicMaterial } from 'three'
+import { ParticleSystem } from 'three.quarks'
+import { createParticleEditor } from '../src/index'
+import type { ParticleEditor, ParticleEditorOptions } from '../src/index'
+import { parseQuarksDocument } from '../src/document'
+
+const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn() }))
+vi.mock('three', async (original) => ({
+  ...(await original<typeof import('three')>()),
+  WebGLRenderer: class {
+    setPixelRatio() {}
+    dispose = gpu.dispose
+  },
+}))
+vi.mock('three/examples/jsm/controls/OrbitControls.js', () => ({
+  OrbitControls: class {
+    target = { set: vi.fn() }
+    dispose = gpu.controlsDispose
+  },
+}))
+
+class ElementStub {
+  innerHTML = ''
+  textContent = ''
+  value = ''
+  inert = false
+  children: ElementStub[] = []
+  parent?: ElementStub
+  shadowRoot?: ElementStub
+  classList = { toggle: vi.fn(), remove: vi.fn(), add: vi.fn() }
+  listeners = new Map<string, (event: unknown) => void>()
+  elements = new Map<string, ElementStub>()
+  querySelector(selector: string): ElementStub {
+    let element = this.elements.get(selector)
+    if (!element) {
+      element = new ElementStub()
+      this.elements.set(selector, element)
+    }
+    return element
+  }
+  querySelectorAll() {
+    return []
+  }
+  setAttribute() {}
+  append(...children: ElementStub[]) {
+    for (const child of children) {
+      child.parent = this
+      this.children.push(child)
+    }
+  }
+  attachShadow() {
+    return (this.shadowRoot = new ElementStub())
+  }
+  remove() {
+    if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this)
+  }
+  addEventListener(
+    type: string,
+    listener: (event: unknown) => void,
+    options?: AddEventListenerOptions,
+  ) {
+    this.listeners.set(type, listener)
+    options?.signal?.addEventListener('abort', () => this.listeners.delete(type))
+  }
+}
+
+const instances: ParticleEditor[] = []
+let browser: ElementStub
+let disconnect: ReturnType<typeof vi.fn>
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  gpu.dispose.mockClear()
+  gpu.controlsDispose.mockClear()
+  const document = Object.assign(new ElementStub(), {
+    baseURI: 'https://example.com/project/',
+    createElement: () => new ElementStub(),
+  })
+  browser = Object.assign(new ElementStub(), {
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: vi.fn(() => 1),
+    cancelAnimationFrame: vi.fn(),
+    confirm: vi.fn(() => true),
+  })
+  disconnect = vi.fn()
+  vi.stubGlobal('document', document)
+  vi.stubGlobal('window', browser)
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      disconnect = disconnect
+    },
+  )
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => {
+      throw new Error('Editor must not fetch project APIs')
+    }),
+  )
+})
+
+afterEach(() => {
+  for (const editor of instances.splice(0)) editor.destroy()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  vi.useRealTimers()
+})
+
+function effect(id = 'project-effect', material = new MeshBasicMaterial()) {
+  const group = new Group()
+  group.name = id
+  group.add(new ParticleSystem({ material, autoDestroy: false }).emitter)
+  return { id, json: parseQuarksDocument(group.toJSON()) }
+}
+
+function mount(options?: ParticleEditorOptions) {
+  const container = new ElementStub()
+  const editor = createParticleEditor(container as unknown as HTMLElement, options)
+  instances.push(editor)
+  const root = container.children[0]!.shadowRoot!.children[1]!
+  const click = (action: string) =>
+    root.listeners.get('click')?.({
+      target: { closest: () => ({ dataset: { action } }) },
+    })
+  const select = (id: string) =>
+    root.listeners.get('click')?.({
+      target: { closest: () => ({ dataset: { effect: id } }) },
+    })
+  return { editor, container, root, click, select }
+}
+
+describe('project-independent particle editor', () => {
+  it('starts empty without assets, project API requests, or a save backend', async () => {
+    const { editor, root } = mount()
+    await editor.ready
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('00')
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Select or create')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('browses only host effects and textures and does not mutate host documents', async () => {
+    const source = effect()
+    const original = structuredClone(source)
+    const { editor, root, click } = mount({
+      listEffects: async () => [source],
+      listTextures: async () => [{ id: 'custom texture', url: '../sprites/smoke.webp?v=2' }],
+    })
+    await editor.ready
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('custom texture')
+    click('duplicate-system')
+    expect(source).toEqual(original)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('keeps new edits dirty while an earlier save is in flight', async () => {
+    let finishSave!: () => void
+    const saveEffect = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve
+        }),
+    )
+    const { editor, click, root } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    click('save')
+    click('duplicate-system')
+    click('save')
+    expect(saveEffect).toHaveBeenCalledTimes(1)
+    finishSave()
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Saved native'),
+    )
+    expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
+  it('shows the inspector after importing the first effect into an empty project', async () => {
+    const { editor, root } = mount()
+    await editor.ready
+    root.querySelector('[data-file-input]').listeners.get('change')?.({
+      target: {
+        files: [{ name: 'imported.json', text: async () => JSON.stringify(effect().json) }],
+      },
+    })
+    await vi.waitFor(() =>
+      expect(root.querySelector('[data-inspector]').innerHTML).toContain('inspector-head'),
+    )
+    expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
+  it('restores the last saved custom effect, not a bundled preset, on discard', async () => {
+    const { editor, click, select, root } = mount({
+      listEffects: async () => [effect('first'), effect('second')],
+      saveEffect: async () => {},
+    })
+    await editor.ready
+    click('duplicate-system')
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    click('duplicate-system')
+    select('second')
+    select('first')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+  })
+
+  it('retains the document when project deletion fails', async () => {
+    const { editor, click, root } = mount({
+      listEffects: async () => [effect()],
+      deleteEffect: async () => {
+        throw new Error('Permission denied')
+      },
+    })
+    await editor.ready
+    click('delete-effect')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toBe('Permission denied'),
+    )
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('project-effect')
+  })
+
+  it('reports save errors without clearing unsaved changes', async () => {
+    const { editor, click, root } = mount({
+      listEffects: async () => [effect()],
+      saveEffect: async () => {
+        throw new Error('Disk full')
+      },
+    })
+    await editor.ready
+    click('duplicate-system')
+    click('save')
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toBe('Disk full'))
+    expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
+  it('protects project defaults from deletion and resets overrides through the host', async () => {
+    const source = effect()
+    const deleteEffect = vi.fn(async () => {})
+    const { editor, click, root } = mount({
+      listEffects: async () => [{ ...source, defaultJson: source.json }],
+      deleteEffect,
+    })
+    await editor.ready
+    click('delete-effect')
+    expect(deleteEffect).not.toHaveBeenCalled()
+    click('duplicate-system')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    click('reset-effect')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toBe('Project default restored'),
+    )
+    expect(deleteEffect).toHaveBeenCalledWith('project-effect')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('01')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+  })
+
+  it('preserves an embedded texture and authored material settings when changing blending', async () => {
+    class SelectStub extends ElementStub {
+      dataset = { bind: 'additive' }
+    }
+    vi.stubGlobal('HTMLSelectElement', SelectStub)
+    vi.stubGlobal('HTMLInputElement', class {})
+    const map = new DataTexture(new Uint8Array([255, 128, 0, 255]), 1, 1)
+    const source = effect(
+      'embedded',
+      new MeshBasicMaterial({ map, opacity: 0.35, transparent: true }),
+    )
+    const saveEffect = vi.fn(async () => {})
+    const { editor, root, click } = mount({ listEffects: async () => [source], saveEffect })
+    await editor.ready
+    const select = new SelectStub()
+    select.value = 'false'
+    root.listeners.get('input')?.({ target: select })
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const saved = (saveEffect.mock.calls[0] as unknown as [string, typeof source.json])[1]
+    expect(saved.images?.map((image) => image.url)).toEqual(
+      source.json.images?.map((image) => image.url),
+    )
+    expect(saved.materials).toEqual(
+      expect.arrayContaining([expect.objectContaining({ opacity: 0.35, map: expect.any(String) })]),
+    )
+  })
+
+  it('keeps the edited document when a reset fails', async () => {
+    const source = effect()
+    const { editor, click, root } = mount({
+      listEffects: async () => [{ ...source, defaultJson: source.json }],
+      deleteEffect: async () => {
+        throw new Error('Reset refused')
+      },
+    })
+    await editor.ready
+    click('duplicate-system')
+    click('reset-effect')
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toBe('Reset refused'))
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    expect(root.inert).toBe(false)
+  })
+
+  it('removes a saved effect only after the host confirms deletion', async () => {
+    let finish!: () => void
+    const { editor, click, root } = mount({
+      listEffects: async () => [effect()],
+      deleteEffect: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    })
+    await editor.ready
+    click('delete-effect')
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
+    finish()
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('00'))
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Select or create')
+  })
+
+  it('rejects unsafe project textures and exposes loading failures through ready', async () => {
+    const { editor } = mount({
+      listTextures: async () => [{ id: 'bad', url: 'javascript:alert(1)' }],
+    })
+    await expect(editor.ready).rejects.toThrow('texture must use')
+  })
+
+  it('does not initialize WebGL after unmount while project data is loading', async () => {
+    let resolve!: (value: []) => void
+    const { editor, container } = mount({
+      listEffects: () =>
+        new Promise((done) => {
+          resolve = done
+        }),
+    })
+    editor.destroy()
+    resolve([])
+    await editor.ready
+    expect(container.children).toHaveLength(0)
+    expect(gpu.dispose).not.toHaveBeenCalled()
+  })
+
+  it('isolates instances, shortcuts, and releases resources on repeated destroy', async () => {
+    const first = mount({ listEffects: async () => [effect()] })
+    const second = mount()
+    await Promise.all([first.editor.ready, second.editor.ready])
+    expect(first.root.listeners.has('keydown')).toBe(true)
+    first.editor.destroy()
+    first.editor.destroy()
+    expect(first.container.children).toHaveLength(0)
+    expect(second.container.children).toHaveLength(1)
+    expect(disconnect).toHaveBeenCalledTimes(1)
+    expect(gpu.dispose).toHaveBeenCalledTimes(1)
+    expect(gpu.controlsDispose).toHaveBeenCalledTimes(1)
+    expect(first.root.listeners.size).toBe(0)
+    expect(browser.listeners.has('keydown')).toBe(false)
+  })
+})
