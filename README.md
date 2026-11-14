@@ -1,10 +1,58 @@
 # Quarks Particle Editor
 
-A framework-independent browser editor for native Three.js / `three.quarks`
-particle documents. **No bundled effects, textures, game code, or backend.**
-The consuming project supplies its library and persistence callbacks.
+A local-file-first browser editor for native Three.js / `three.quarks` particle
+documents, with a Unity-inspired workspace and foldout module inspector.
+**No bundled effects, textures, accounts, uploads, or backend required.**
+Also available as a framework-independent, embeddable npm package.
 
 Source: [laminhtruong/quarks-particle-editor](https://github.com/laminhtruong/quarks-particle-editor).
+
+## Open your own files
+
+```sh
+git clone https://github.com/laminhtruong/quarks-particle-editor.git
+cd quarks-particle-editor
+npm ci
+npm run dev
+```
+
+Open the URL printed by Vite:
+
+1. Click **Open JSON** to browse a native Quarks effect, or **New effect** to
+   create one. Unity `.prefab`, `.unity`, and `.vfx` files are not supported.
+2. Click **Import Textures** to select PNG, JPEG, WebP, or GIF files. Select a
+   thumbnail in **Project** to assign it to the selected particle system.
+3. To resolve a JSON's relative image paths, import textures first, then open JSON;
+   matching is by exact filename including extension. Alternatively, drop one
+   JSON and its textures together into the editor. Remote URLs are not rewritten.
+4. Edit modules in **Inspector**, then use Play/Pause, Restart, Step, or the
+   preview scrubber to check the result.
+5. **Download JSON** (Ctrl/Cmd+S) downloads a new file with assigned local textures
+   embedded. Reopen it later to continue. The original file is never overwritten.
+
+Files stay in the current browser session; reload loses the session. Download
+each changed effect before leaving. No data is uploaded by the editor itself;
+JSON with external texture URLs can make network requests to those URLs.
+Duplicate texture filenames are rejected instead of silently replacing assets.
+Raster files are limited to 16 MB / 8192 pixels per dimension; JSON to 64 MB.
+
+### Familiar particle-authoring layout
+
+- **Hierarchy** selects emitters within an effect.
+- **Scene** previews the effect on an orbitable grid.
+- **Project** lists opened effects and imported textures.
+- **Inspector** uses compact, collapsible **Transform**, **Main**, **Emission**,
+  **Shape**, **Renderer**, **Size over Lifetime**, **Color over Lifetime**, and
+  **Texture Sheet Animation** sections. Foldout state survives inspector updates.
+- Space: play/pause; R: restart; F: frame; Ctrl/Cmd+O: open;
+  Ctrl/Cmd+S: download/save; Ctrl/Cmd+Z / Shift+Z: undo/redo.
+
+This is **Unity-inspired, not a Unity clone or compatibility layer**. It edits
+Quarks behavior only: no fake Unity modules, Unity asset importer, or copied
+Unity artwork. Complex native properties remain available through the JSON
+editor. Burst controls edit the first burst; additional bursts are preserved.
+Curve editing supports the existing Quarks piecewise Bezier representation,
+not Unity's full MinMaxCurve/gradient authoring feature set.
 
 ## Install
 
@@ -16,10 +64,10 @@ npm ci
 npm run check
 npm pack
 # From the consuming project:
-npm install /path/to/quarks-particle-editor-0.1.0.tgz three@^0.187.0 three.quarks@^0.17.1
+npm install /path/to/quarks-particle-editor-0.2.0.tgz three@^0.187.0 three.quarks@^0.17.1
 ```
 
-Requires a modern browser with WebGL2 and Shadow DOM. Node.js 22+ is needed for
+Requires a modern browser with WebGL2 and Shadow DOM. Node.js 22.12+ is needed for
 development. Three.js and Quarks are peer dependencies, not bundled copies.
 
 ## Empty editor
@@ -38,8 +86,9 @@ editor.destroy()
 Give the container an explicit height, for example `height: 100vh`. Styles are
 included inside a Shadow DOM; no global stylesheet import is needed. Multiple
 editors can coexist. Keyboard shortcuts apply only inside the focused editor.
-Create and import work without a backend; use Export JSON to download work.
-Save reports that no handler is configured when `saveEffect` is omitted.
+Create, open, import textures, and download all work without callbacks. Save
+downloads JSON when `saveEffect` is omitted. With a callback it saves through the
+host; **Export JSON** still downloads an independent copy.
 
 ## Browse your project's data
 
@@ -125,5 +174,12 @@ the resulting tarball in the consuming project. Publishing to npm is a separate,
 explicit release operation; no publish credentials or automatic publish job are
 included.
 
+## Community and license
+
+See [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), and
+[Security](SECURITY.md). Use GitHub issues for bugs and feature discussions.
+
 Extracted from [Bug Battle 3D](https://github.com/laminhtruong/bug-battle-3d),
-MIT licensed. Not an official Quarks project.
+[MIT licensed](LICENSE). Not affiliated with Unity Technologies or the Quarks
+project. Unity is a trademark of its respective owner. Dependencies retain
+their own licenses; no Unity source code, logos, or assets are distributed.

@@ -30,6 +30,7 @@ import {
 import { parseQuarksDocument, textureUrlSchema, type QuarksDocument } from './document.js'
 import { intervalBounds, updateParticlePreview } from './preview.js'
 import style from './style.css?inline'
+import { readTextureFile, resolveLocalTextures } from './local-files.js'
 
 export { parseQuarksDocument, quarksDocumentSchema } from './document.js'
 export type { QuarksDocument } from './document.js'
@@ -82,41 +83,42 @@ export function createParticleEditor(
   root.innerHTML = `
   <div class="studio">
     <header class="topbar">
-      <div class="brand"><div class="brand-mark">\u{2733}</div><div><div class="brand-title">QUARKS STUDIO</div><div class="brand-subtitle">Native ParticleEmitter JSON</div></div></div>
-      <div class="top-actions"><button class="btn ghost" type="button" data-action="undo" title="Undo (Ctrl+Z)" disabled>Undo</button><button class="btn ghost" type="button" data-action="redo" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button><span class="save-state" data-save-state>All changes saved</span><button class="btn" type="button" data-action="import">Import JSON</button><button class="btn" type="button" data-action="export">Export JSON</button><button class="btn primary" type="button" data-action="save">Save effect&nbsp; <span>Ctrl+S</span></button></div>
+      <div class="brand"><div class="brand-title">Quarks Particle Editor</div></div>
+      <div class="top-actions"><button class="btn" type="button" data-action="import" title="Open a native Quarks JSON file (Ctrl+O)">Open JSON</button><button class="btn" type="button" data-action="import-texture">Import Textures</button><button class="btn ghost" type="button" data-action="undo" title="Undo (Ctrl+Z)" disabled>Undo</button><button class="btn ghost" type="button" data-action="redo" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button><span class="save-state" data-save-state>No unsaved changes</span><button class="btn" type="button" data-action="export">Export JSON</button><button class="btn primary" type="button" data-action="save">${options.saveEffect ? 'Save to Project' : 'Download JSON'}</button></div>
     </header>
     <main class="workspace">
       <aside class="left-panel">
-        <section class="panel-block">
-          <div class="section-title"><span>Effects library</span><span class="count" data-effect-count>00</span></div>
-          <input class="search" type="search" placeholder="Search effects\u{2026}" aria-label="Search effects" data-search>
-          <div class="effect-list" data-effect-list></div>
-          <div class="system-actions"><button class="btn small" type="button" data-action="new">+ New effect</button><button class="btn small" type="button" data-action="duplicate" title="Duplicate selected effect">Copy</button></div>
-        </section>
+        <div class="panel-tab">Hierarchy</div>
         <section class="panel-block">
           <div class="section-title"><span>Hierarchy</span><span class="count" data-system-count>00</span></div>
           <div data-system-list></div>
           <div class="system-actions"><button class="btn small" type="button" data-action="add-system">+ Add</button><button class="btn small" type="button" data-action="duplicate-system" title="Duplicate selected system">Copy</button><button class="btn small" type="button" data-action="move-system-up" title="Move system up">Up</button><button class="btn small" type="button" data-action="move-system-down" title="Move system down">Down</button><button class="btn small danger" type="button" data-action="remove-system" title="Remove selected system">-</button></div>
         </section>
-        <section class="panel-block"><div class="section-title"><span>Shortcuts</span></div><div class="hint">Space \u{b7} Play / pause<br>Ctrl+Z / Ctrl+Shift+Z \u{b7} Undo / redo<br>Ctrl+S \u{b7} Save native JSON<br>Drag \u{b7} Orbit camera&nbsp; \u{b7} &nbsp;Scroll \u{b7} Zoom</div></section>
+        <section class="panel-block"><div class="hint">Open a JSON file or create a particle system to begin.<br><br>Space: Play / Pause<br>R: Restart &nbsp; F: Frame selected<br>Ctrl+O: Open &nbsp; Ctrl+S: Save / Download<br>Drag: Orbit &nbsp; Scroll: Zoom</div></section>
       </aside>
       <section class="stage">
+        <div class="panel-tab">Scene <span class="hint">Perspective \u{b7} Quarks runtime</span></div>
         <div class="viewport">
           <canvas id="vfx-canvas" aria-label="Particle effect preview"></canvas>
-          <div class="viewport-label"><strong>Scene view</strong><span>Quarks runtime \u{b7} Perspective</span></div>
-          <div class="view-badge">REAL-TIME PREVIEW</div>
+          <div class="viewport-label"><strong>Particle Effect</strong><span>Drop a JSON file or textures here</span></div>
           <div class="viewport-actions"><button class="btn" type="button" data-action="frame">Frame</button><button class="btn" type="button" data-action="grid">Grid</button></div>
         </div>
         <div class="timeline">
           <div class="transport"><button class="btn" type="button" data-action="restart" title="Restart (R)">Restart</button><button class="btn primary" type="button" data-action="play" title="Play / pause (Space)" data-play>Play</button><button class="btn" type="button" data-action="step" title="Step frame">Step</button><div class="time-readout"><span data-time>0.00</span> <span>/</span> <span data-duration>0.00 s</span></div></div>
           <div class="timeline-track"><div class="timeline-progress" data-progress></div><div class="timeline-knob" data-knob></div><div class="timeline-ticks"><span>0s</span><span>25%</span><span>50%</span><span>75%</span><span data-end-tick>1s</span></div><input class="timeline-input" type="range" min="0" max="1000" value="0" aria-label="Preview timeline" data-timeline></div>
         </div>
+        <section class="project-panel" aria-label="Project assets">
+          <div class="panel-tab">Project <span class="hint">Local session \u{b7} files stay in your browser</span></div>
+          <div class="project-toolbar"><input class="search" type="search" placeholder="Search effects" aria-label="Search effects" data-search><button class="btn small" type="button" data-action="new">+ New effect</button><button class="btn small" type="button" data-action="duplicate" title="Duplicate selected effect">Duplicate</button></div>
+          <div class="project-columns"><section><div class="section-title"><span>Effects</span><span data-effect-count>00</span></div><div class="effect-list" data-effect-list></div></section><section><div class="section-title"><span>Textures</span><button class="btn small" type="button" data-action="import-texture">+ Browse</button></div><div class="texture-list" data-texture-list></div></section></div>
+        </section>
       </section>
       <aside class="right-panel" data-inspector></aside>
     </main>
   </div>
   <input type="file" accept="application/json,.json" hidden data-file-input>
-  <div class="toast" hidden></div>
+  <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple hidden data-texture-input>
+  <div class="toast" role="status" aria-live="polite" hidden></div>
 `
 
   type NativeNode = {
@@ -171,6 +173,7 @@ export function createParticleEditor(
   let resize: ResizeObserver | undefined
   const undoStack: EffectFile[] = []
   const redoStack: EffectFile[] = []
+  const collapsedModules = new Set<string>()
 
   const currentEffect = (): EffectFile | undefined =>
     effects.find((effect) => effect.id === currentId)
@@ -476,11 +479,16 @@ export function createParticleEditor(
   }
 
   function renderInspector(): void {
+    for (const module of inspector.querySelectorAll<HTMLDetailsElement>('[data-module]')) {
+      if (module.open) collapsedModules.delete(module.dataset.module!)
+      else collapsedModules.add(module.dataset.module!)
+    }
     const effect = currentEffect()
     const emitter = currentEmitter()
     const system = emitter?.system
     if (!effect || !system) {
-      inspector.innerHTML = '<div class="empty-list">Select or create a Quarks effect.</div>'
+      inspector.innerHTML =
+        '<div class="panel-tab">Inspector</div><div class="empty-list">Select or create a Quarks effect.<br><br>Open JSON to edit a local file, or import textures and create a new effect. No account or backend required.</div>'
       return
     }
     const life = intervalBounds(system.startLife, [1, 1])
@@ -520,51 +528,108 @@ export function createParticleEditor(
       'rectangle',
       'grid',
     ]
-    inspector.innerHTML = `
-    <header class="inspector-head"><div class="inspector-kicker">${isBuiltIn(effect.id) ? 'QUARKS PRESET' : 'NATIVE QUARKS EFFECT'} \u{b7} SYSTEM ${String(systemIndex + 1).padStart(2, '0')}</div><input class="inspector-title" value="${esc(displayName(effect))}" aria-label="Effect name" data-bind="effect.name"><div class="inspector-sub">${esc(effect.id)} <span>\u{b7}</span> ${emitters().length} ParticleEmitter${emitters().length === 1 ? '' : 's'}</div></header>
-    <section class="inspect-section"><h3>Effect object rotation</h3><div class="field-grid">
-      <label class="field"><span>ROTATION X \u{b7} DEG</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.x * 180) / Math.PI)}" data-bind="effect.rotation.x"></label>
-      <label class="field"><span>ROTATION Y \u{b7} DEG</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.y * 180) / Math.PI)}" data-bind="effect.rotation.y"></label>
-      <label class="field"><span>ROTATION Z \u{b7} DEG</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.z * 180) / Math.PI)}" data-bind="effect.rotation.z"></label>
+    const markup = `
+    <div class="panel-tab">Inspector</div><header class="inspector-head"><div class="inspector-kicker">Particle System</div><input class="inspector-title" value="${esc(displayName(effect))}" aria-label="Effect name" data-bind="effect.name"><div class="inspector-sub">${esc(emitter.name || `Particle System ${systemIndex + 1}`)} <span>\u{b7}</span> ${esc(effect.id)}</div></header>
+    <section class="inspect-section"><h3>Transform</h3><div class="field-grid">
+      <label class="field"><span>Rotation X (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.x * 180) / Math.PI)}" data-bind="effect.rotation.x"></label>
+      <label class="field"><span>Rotation Y (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.y * 180) / Math.PI)}" data-bind="effect.rotation.y"></label>
+      <label class="field"><span>Rotation Z (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.z * 180) / Math.PI)}" data-bind="effect.rotation.z"></label>
     </div><p class="hint">Rotates the native root Group and all its emitters. Angles are degrees.</p></section>
-    <section class="inspect-section"><h3>Emission</h3><div class="field-grid">
-      <label class="field"><span>DURATION \u{b7} S</span><input type="number" min="0.01" step="0.05" value="${num(system.duration)}" data-bind="duration"></label>
-      <label class="field"><span>RATE \u{b7} /SEC</span><input type="number" min="0" step="1" value="${num(intervalBounds(system.emissionOverTime, [0, 0])[1])}" data-bind="rate"></label>
-      <label class="field"><span>RATE \u{b7} DISTANCE</span><input type="number" min="0" step="0.1" value="${num(intervalBounds(system.emissionOverDistance, [0, 0])[1])}" data-bind="distanceRate"></label>
-      <label class="field"><span>LIFETIME \u{b7} MIN</span><input type="number" min="0.01" step="0.05" value="${num(life[0])}" data-bind="life.0"></label>
-      <label class="field"><span>LIFETIME \u{b7} MAX</span><input type="number" min="0.01" step="0.05" value="${num(life[1])}" data-bind="life.1"></label>
-      <label class="field"><span>BURST COUNT</span><input type="number" min="0" step="1" value="${num(burstCount)}" data-bind="burst.count"></label>
-      <label class="field"><span>BURST TIME \u{b7} S</span><input type="number" min="0" step="0.05" value="${num(burst?.time ?? 0)}" data-bind="burst.time"></label>
-      <label class="check-field"><input type="checkbox" ${system.looping ? 'checked' : ''} data-bind="looping"> Loop system</label>
-      <label class="check-field"><input type="checkbox" ${system.worldSpace ? 'checked' : ''} data-bind="worldSpace"> World space</label>
+    <section class="inspect-section"><h3>Main</h3><div class="field-grid">
+      <label class="field"><span>Duration (s)</span><input type="number" min="0.01" step="0.05" value="${num(system.duration)}" data-bind="duration"></label>
+      <label class="field"><span>Start Lifetime Min</span><input type="number" min="0.01" step="0.05" value="${num(life[0])}" data-bind="life.0"></label>
+      <label class="field"><span>Start Lifetime Max</span><input type="number" min="0.01" step="0.05" value="${num(life[1])}" data-bind="life.1"></label>
+      <label class="check-field"><input type="checkbox" ${system.looping ? 'checked' : ''} data-bind="looping"> Looping</label>
+      <label class="field"><span>Simulation Space</span><select data-bind="worldSpace"><option value="false" ${system.worldSpace ? '' : 'selected'}>Local</option><option value="true" ${system.worldSpace ? 'selected' : ''}>World</option></select></label>
       <label class="check-field"><input type="checkbox" ${system.prewarm ? 'checked' : ''} data-bind="prewarm"> Prewarm</label>
       <label class="check-field"><input type="checkbox" ${system.autoDestroy ? 'checked' : ''} data-bind="autoDestroy"> Auto destroy</label>
-    </div><p class="hint">Rate and bursts map to native Quarks emissionOverTime/emissionBursts.</p></section>
-    <section class="inspect-section"><h3>Initial properties & shape</h3><div class="field-grid">
-      <label class="field"><span>SPEED \u{b7} MIN</span><input type="number" min="0" step="0.5" value="${num(speed[0])}" data-bind="speed.0"></label>
-      <label class="field"><span>SPEED \u{b7} MAX</span><input type="number" min="0" step="0.5" value="${num(speed[1])}" data-bind="speed.1"></label>
-      <label class="field"><span>SIZE \u{b7} MIN</span><input type="number" min="0.01" step="0.05" value="${num(size[0])}" data-bind="size.0"></label>
-      <label class="field"><span>SIZE \u{b7} MAX</span><input type="number" min="0.01" step="0.05" value="${num(size[1])}" data-bind="size.1"></label>
-      <label class="field"><span>ROTATION \u{b7} MIN DEG</span><input type="number" step="5" value="${num((rotation[0] * 180) / Math.PI)}" data-bind="rotation.0"></label>
-      <label class="field"><span>ROTATION \u{b7} MAX DEG</span><input type="number" step="5" value="${num((rotation[1] * 180) / Math.PI)}" data-bind="rotation.1"></label>
-      <label class="field"><span>EMITTER SHAPE</span><select data-bind="shape.kind">${shapeKinds.map((kind) => `<option value="${kind}" ${system.emitterShape.type === kind ? 'selected' : ''}>${kind}</option>`).join('')}</select></label>
-      ${shapeFields(system)}
-      <label class="field"><span>GRAVITY Y</span><input type="number" step="0.5" value="${num(gravityOf(system))}" data-bind="gravity"></label>
+      <label class="field"><span>Start Speed Min</span><input type="number" min="0" step="0.5" value="${num(speed[0])}" data-bind="speed.0"></label>
+      <label class="field"><span>Start Speed Max</span><input type="number" min="0" step="0.5" value="${num(speed[1])}" data-bind="speed.1"></label>
+      <label class="field"><span>Start Size Min</span><input type="number" min="0.01" step="0.05" value="${num(size[0])}" data-bind="size.0"></label>
+      <label class="field"><span>Start Size Max</span><input type="number" min="0.01" step="0.05" value="${num(size[1])}" data-bind="size.1"></label>
+      <label class="field"><span>Start Rotation Min (deg)</span><input type="number" step="5" value="${num((rotation[0] * 180) / Math.PI)}" data-bind="rotation.0"></label>
+      <label class="field"><span>Start Rotation Max (deg)</span><input type="number" step="5" value="${num((rotation[1] * 180) / Math.PI)}" data-bind="rotation.1"></label>
+      <label class="field"><span>Gravity Y</span><input type="number" step="0.5" value="${num(gravityOf(system))}" data-bind="gravity"></label>
+      <label class="field"><span>Start Color</span><input type="color" value="${asHex(color)}" data-bind="startColor" ${constantStartColor ? '' : 'disabled title="Edit native random colors in Native Quarks JSON"'}></label>
+      <label class="field"><span>Start Alpha</span><input type="number" min="0" max="1" step="0.05" value="${num(color[3])}" data-bind="startAlpha" ${constantStartColor ? '' : 'disabled title="Edit native random colors in Native Quarks JSON"'}></label>
     </div></section>
-    <section class="inspect-section"><h3>Renderer & material</h3><div class="field-grid">
-      <label class="field full"><span>TEXTURE</span><select data-bind="material">${textureOptions}</select></label>
+    <section class="inspect-section"><h3>Emission</h3><div class="field-grid">
+      <label class="field"><span>Rate over Time</span><input type="number" min="0" step="1" value="${num(intervalBounds(system.emissionOverTime, [0, 0])[1])}" data-bind="rate"></label>
+      <label class="field"><span>Rate over Distance</span><input type="number" min="0" step="0.1" value="${num(intervalBounds(system.emissionOverDistance, [0, 0])[1])}" data-bind="distanceRate"></label>
+      <label class="field"><span>Burst Count</span><input type="number" min="0" step="1" value="${num(burstCount)}" data-bind="burst.count"></label>
+      <label class="field"><span>Burst Time (s)</span><input type="number" min="0" step="0.05" value="${num(burst?.time ?? 0)}" data-bind="burst.time"></label>
+    </div><p class="hint">Edits the first burst. Additional authored bursts are preserved in JSON.</p></section>
+    <section class="inspect-section"><h3>Shape</h3><div class="field-grid">
+      <label class="field"><span>Shape</span><select data-bind="shape.kind">${shapeKinds.map((kind) => `<option value="${kind}" ${system.emitterShape.type === kind ? 'selected' : ''}>${kind}</option>`).join('')}</select></label>
+      ${shapeFields(system)}
+    </div></section>
+    <section class="inspect-section"><h3>Renderer</h3><div class="field-grid">
+      <label class="field full"><span>Texture</span><select data-bind="material">${textureOptions}</select></label>
+      <button class="btn small" type="button" data-action="import-texture">Browse Texture...</button>
       <div class="field full">${textures.has(material.name) ? `<img class="asset-preview" src="${esc(textures.get(material.name)!)}" alt="${esc(material.name)} texture">` : '<span class="hint">Embedded texture or no project texture selected</span>'}</div>
-      <label class="field full"><span>RENDER MODE</span><select data-bind="renderMode">${modes.map(([mode, label]) => `<option value="${mode}" ${system.renderMode === mode ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
-      <label class="field"><span>BLENDING</span><select data-bind="additive"><option value="true" ${material.additive ? 'selected' : ''}>Additive</option><option value="false" ${material.additive ? '' : 'selected'}>Alpha</option></select></label>
-      <label class="field"><span>START COLOR</span><input type="color" value="${asHex(color)}" data-bind="startColor" ${constantStartColor ? '' : 'disabled title="Edit native random colors in Native Quarks JSON"'}></label>
-      <label class="field"><span>START ALPHA</span><input type="number" min="0" max="1" step="0.05" value="${num(color[3])}" data-bind="startAlpha" ${constantStartColor ? '' : 'disabled title="Edit native random colors in Native Quarks JSON"'}></label>
+      <label class="field full"><span>Render Mode</span><select data-bind="renderMode">${modes.map(([mode, label]) => `<option value="${mode}" ${system.renderMode === mode ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      <label class="field"><span>Blending</span><select data-bind="additive"><option value="true" ${material.additive ? 'selected' : ''}>Additive</option><option value="false" ${material.additive ? '' : 'selected'}>Alpha</option></select></label>
     </div><p class="hint">These controls update a live Quarks ParticleSystem, not an editor-specific particle schema.</p></section>
     <section class="inspect-section"><h3>Size over lifetime</h3>${curve ? '<div class="curve-box"><svg viewBox="0 0 100 100" preserveAspectRatio="none" data-curve></svg><span class="curve-label">0 \u{2192} LIFE \u{2192} 100%</span></div><div class="curve-tools"><span>Quarks PiecewiseBezier</span><div><button class="btn" type="button" data-action="add-curve-key">+ Key</button> <button class="btn" type="button" data-action="remove-curve-key">- Key</button></div></div>' : '<button class="btn small" type="button" data-action="enable-curve">+ Add SizeOverLife</button>'}</section>
     <section class="inspect-section"><h3>Color over lifetime</h3>${renderColorStops(system)}</section>
     <section class="inspect-section"><h3>Texture sheet</h3><div class="field-grid"><label class="field"><span>TILE X</span><input type="number" min="1" step="1" value="${system.uTileCount}" data-bind="uTileCount"></label><label class="field"><span>TILE Y</span><input type="number" min="1" step="1" value="${system.vTileCount}" data-bind="vTileCount"></label><label class="field"><span>START TILE</span><input type="number" min="0" step="1" value="${intervalBounds(system.startTileIndex, [0, 0])[1]}" data-bind="startTileIndex"></label><label class="check-field"><input type="checkbox" ${system.blendTiles ? 'checked' : ''} data-bind="blendTiles"> Blend frames</label>${frameRange(system) ? `<label class="field"><span>FRAME START</span><input type="number" step="1" value="${num(frameRange(system)![0])}" data-bind="frame.start"></label><label class="field"><span>FRAME END</span><input type="number" step="1" value="${num(frameRange(system)![1])}" data-bind="frame.end"></label>` : '<button class="btn small" type="button" data-action="enable-frame">+ Add FrameOverLife</button>'}</div><p class="hint">Animation uses Quarks' native FrameOverLife behavior.</p></section>
     <section class="inspect-section"><details class="native-json"><summary>Native Quarks JSON</summary><textarea spellcheck="false" aria-label="Native Quarks JSON" data-native-json>${esc(JSON.stringify(effect.json, null, 2))}</textarea><button class="btn small" type="button" data-action="apply-json">Apply document</button></details></section>
     <section class="inspect-section"><button class="btn danger small" type="button" data-action="delete-effect" ${isBuiltIn(effect.id) || (savedIds.has(effect.id) && !options.deleteEffect) ? 'disabled' : ''}>Delete effect</button>${isBuiltIn(effect.id) && options.deleteEffect ? '<button class="btn small" type="button" data-action="reset-effect">Reset to project default</button>' : ''}</section>`
+    inspector.innerHTML = markup.replace(
+      /<section class="inspect-section"><h3>([^<]+)<\/h3>([\s\S]*?)<\/section>/g,
+      (_match, title: string, content: string) =>
+        `<details class="particle-module" data-module="${esc(title)}" ${collapsedModules.has(title) ? '' : 'open'}><summary>${esc(title)}</summary><div class="module-body">${content}</div></details>`,
+    )
     if (curve) drawCurve($<SVGSVGElement>('[data-curve]'), curve)
+  }
+
+  function renderTextures(): void {
+    $('[data-texture-list]').innerHTML = textures.size
+      ? [...textures]
+          .map(
+            ([id, url]) =>
+              `<button class="texture-item" type="button" data-texture="${esc(id)}" title="Assign ${esc(id)} to selected particle system"><img src="${esc(url)}" alt=""><span>${esc(id)}</span></button>`,
+          )
+          .join('')
+      : '<p class="empty-list">No textures. Browse or drop PNG, JPEG, WebP, or GIF files.</p>'
+  }
+
+  async function importTextures(files: readonly File[]): Promise<void> {
+    for (const file of files) {
+      if (destroyed) return
+      try {
+        if (textures.has(file.name))
+          throw new Error(
+            `A texture named "${file.name}" is already loaded. Rename the file to import another version.`,
+          )
+        const url = await readTextureFile(file)
+        if (destroyed) return
+        if (textures.has(file.name))
+          throw new Error(`A texture named "${file.name}" is already loaded.`)
+        textures.set(file.name, url)
+        renderTextures()
+        renderInspector()
+        flash(
+          `Imported ${file.name}. Select its thumbnail to assign it, or open JSON to resolve matching texture filenames.`,
+        )
+      } catch (error) {
+        if (!destroyed)
+          flash(error instanceof Error ? error.message : 'Could not import texture', true)
+      }
+    }
+  }
+
+  function assignTexture(id: string): void {
+    const system = currentEmitter()?.system
+    if (!system || !textures.has(id)) return
+    recordHistory()
+    const material = (system.material as THREE.MeshBasicMaterial).clone()
+    const source = createMaterial(id)
+    material.map = source.map
+    source.dispose()
+    system.material = material
+    markEdit()
+    renderInspector()
   }
 
   function drawCurve(svg: SVGSVGElement, points: readonly (readonly [number, number])[]): void {
@@ -729,7 +794,7 @@ export function createParticleEditor(
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     scene = new THREE.Scene()
-    scene.background = new THREE.Color('#0c1119')
+    scene.background = new THREE.Color('#282828')
     camera = new THREE.PerspectiveCamera(43, 1, 0.1, 150)
     camera.position.set(8, 6, 10)
     controls = new OrbitControls(camera, canvas)
@@ -741,12 +806,12 @@ export function createParticleEditor(
     const key = new THREE.DirectionalLight(0xffe2b1, 2.2)
     key.position.set(-4, 8, 5)
     scene.add(key)
-    grid = new THREE.GridHelper(16, 32, 0x46526a, 0x222c3a)
+    grid = new THREE.GridHelper(16, 32, 0x777777, 0x414141)
     grid.position.y = -0.025
     scene.add(grid)
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(8, 64),
-      new THREE.MeshBasicMaterial({ color: 0x101722, transparent: true, opacity: 0.72 }),
+      new THREE.MeshBasicMaterial({ color: 0x303030, transparent: true, opacity: 0.4 }),
     )
     floor.rotation.x = -Math.PI / 2
     floor.position.y = -0.04
@@ -977,26 +1042,18 @@ export function createParticleEditor(
 
   function newNativeSystem(): ParticleSystem {
     return new ParticleSystem({
-      duration: 1,
-      looping: false,
+      duration: 5,
+      looping: true,
       autoDestroy: false,
       shape: new ConeEmitter({ angle: Math.PI / 6, radius: 0.1 }),
-      startLife: new IntervalValue(0.4, 0.8),
-      startSpeed: new IntervalValue(1, 3),
-      startSize: new IntervalValue(0.25, 0.6),
-      startColor: new ConstantColor(new QVector4(1, 0.6, 0.2, 1)),
-      emissionOverTime: new ConstantValue(20),
+      startLife: new ConstantValue(5),
+      startSpeed: new ConstantValue(5),
+      startSize: new ConstantValue(1),
+      startColor: new ConstantColor(new QVector4(1, 1, 1, 1)),
+      emissionOverTime: new ConstantValue(10),
       emissionBursts: [],
       material: createMaterial(textures.keys().next().value ?? ''),
-      behaviors: [
-        new SizeOverLife(
-          linearCurve([
-            [0, 0.2],
-            [0.4, 1],
-            [1, 0],
-          ]),
-        ),
-      ],
+      behaviors: [],
     })
   }
 
@@ -1013,10 +1070,13 @@ export function createParticleEditor(
   }
 
   function openNameModal(title: string, initial: string, callback: (name: string) => void): void {
-    const backdrop = document.createElement('div')
-    backdrop.className = 'modal-backdrop'
-    backdrop.innerHTML = `<form class="modal"><h2>${esc(title)}</h2><p>Effects are stored as Three.js Object3D JSON with Quarks ParticleEmitter data.</p><input name="name" value="${esc(initial)}" maxlength="80" autocomplete="off" aria-label="Effect name"><div class="modal-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Create effect</button></div></form>`
+    const backdrop = document.createElement('dialog')
+    backdrop.className = 'name-dialog'
+    backdrop.setAttribute('aria-label', title)
+    backdrop.innerHTML = `<form class="modal"><h2>${esc(title)}</h2><p>Creates a native Quarks particle system. Download JSON to keep your work.</p><input name="name" value="${esc(initial)}" maxlength="80" required autocomplete="off" aria-label="Effect name"><div class="modal-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Create effect</button></div></form>`
     root.append(backdrop)
+    backdrop.showModal()
+    backdrop.addEventListener('close', () => backdrop.remove(), { once: true })
     const form = backdrop.querySelector('form')!
     const input = form.querySelector('input')!
     input.focus()
@@ -1024,32 +1084,31 @@ export function createParticleEditor(
     form.addEventListener('submit', (event) => {
       event.preventDefault()
       callback(input.value.trim())
-      backdrop.remove()
+      backdrop.close()
     })
-    form.querySelector('[data-cancel]')!.addEventListener('click', () => backdrop.remove())
+    form.querySelector('[data-cancel]')!.addEventListener('click', () => backdrop.close())
   }
 
   async function saveCurrent(): Promise<void> {
     const effect = currentEffect()
     if (!effect || !currentGroup || saving) return
-    if (!options.saveEffect) {
-      flash('This project has no save handler. Use Export JSON instead.', true)
-      return
-    }
     saving = true
     try {
       syncEffect()
       effect.json = parseQuarksDocument(serializeGroup(currentGroup))
       const revision = editRevision
       const snapshot = structuredClone(effect)
-      await options.saveEffect(effect.id, structuredClone(effect.json))
+      if (options.saveEffect) await options.saveEffect(effect.id, structuredClone(effect.json))
+      else exportCurrent()
       if (destroyed) return
       savedEffects.set(effect.id, snapshot)
-      savedIds.add(effect.id)
+      if (options.saveEffect) savedIds.add(effect.id)
       if (currentEffect() === effect && editRevision === revision) setSaved()
       renderEffects()
       renderInspector()
-      flash(`Saved native Quarks JSON: ${effect.id}.json`)
+      flash(
+        `${options.saveEffect ? 'Saved native Quarks JSON' : 'Downloaded JSON (original file unchanged)'}: ${effect.id}.json`,
+      )
     } catch (error) {
       if (!destroyed)
         flash(error instanceof Error ? error.message : 'Could not save Quarks document', true)
@@ -1129,12 +1188,21 @@ export function createParticleEditor(
     $<HTMLInputElement>('[data-timeline]').value = String(Math.round(fraction * 1000))
   }
 
-  function importFile(file: File): void {
-    void file
+  function importFile(file: File): Promise<void> {
+    if (file.size > 64 * 1024 * 1024) {
+      flash('JSON files must not exceed 64 MB.', true)
+      return Promise.resolve()
+    }
+    return file
       .text()
       .then((text) => {
         if (destroyed) return
         const json = parseQuarksDocument(JSON.parse(text))
+        resolveLocalTextures(json, textures)
+        // Validate runtime compatibility before replacing any in-session document.
+        const probe = new QuarksLoader().parse(structuredClone(json))
+        disposeObjects(probe)
+        for (const emitter of emitters(probe)) emitter.system.dispose()
         const name = String(nativeRoot(json).name || file.name.replace(/\.json$/i, ''))
         const id = slug(name)
         const imported = { id, json }
@@ -1145,6 +1213,9 @@ export function createParticleEditor(
           effects = effects.map((effect) => (effect.id === id ? imported : effect))
           currentId = id
           systemIndex = 0
+          undoStack.length = 0
+          redoStack.length = 0
+          updateHistoryButtons()
           markDirty()
           renderEffects()
           renderSystems()
@@ -1160,7 +1231,8 @@ export function createParticleEditor(
   function exportCurrent(): void {
     const effect = currentEffect()
     if (!effect || !currentGroup) return
-    const json = serializeGroup(currentGroup)
+    syncEffect()
+    const json = effect.json
     const url = URL.createObjectURL(
       new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' }),
     )
@@ -1175,10 +1247,14 @@ export function createParticleEditor(
     'click',
     (event) => {
       const target = (event.target as HTMLElement).closest<HTMLElement>(
-        '[data-action], [data-effect], [data-system]',
+        '[data-action], [data-effect], [data-system], [data-texture]',
       )
       if (!target) return
       const action = target.dataset.action
+      if (target.dataset.texture) {
+        assignTexture(target.dataset.texture)
+        return
+      }
       if (action === 'undo') {
         travelHistory(undoStack, redoStack)
         return
@@ -1198,9 +1274,21 @@ export function createParticleEditor(
         return
       }
       if (action === 'save') void saveCurrent()
-      else if (action === 'import') $<HTMLInputElement>('[data-file-input]').click()
-      else if (action === 'export') exportCurrent()
-      else if (action === 'new')
+      else if (action === 'import') {
+        const input = $<HTMLInputElement>('[data-file-input]')
+        input.value = ''
+        input.click()
+      } else if (action === 'import-texture') {
+        const input = $<HTMLInputElement>('[data-texture-input]')
+        input.value = ''
+        input.click()
+      } else if (action === 'export') {
+        try {
+          exportCurrent()
+        } catch (error) {
+          flash(error instanceof Error ? error.message : 'Could not export JSON', true)
+        }
+      } else if (action === 'new')
         openNameModal('Create Quarks effect', 'New Effect', (name) => name && addNewEffect(name))
       else if (action === 'duplicate') {
         const effect = currentEffect()
@@ -1545,9 +1633,54 @@ export function createParticleEditor(
     'change',
     (event) => {
       const file = (event.target as HTMLInputElement).files?.[0]
-      if (file) importFile(file)
+      if (file) void importFile(file)
     },
     { signal: events.signal },
+  )
+
+  $<HTMLInputElement>('[data-texture-input]').addEventListener(
+    'change',
+    (event) => {
+      void importTextures(Array.from((event.target as HTMLInputElement).files ?? []))
+    },
+    { signal: events.signal },
+  )
+
+  root.addEventListener(
+    'dragover',
+    (event) => {
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    },
+    { signal: events.signal },
+  )
+  root.addEventListener(
+    'drop',
+    (event) => {
+      event.preventDefault()
+      const files = Array.from(event.dataTransfer?.files ?? [])
+      const documents = files.filter((file) => /\.json$/i.test(file.name))
+      if (documents.length > 1) {
+        flash('Open one JSON document at a time. Multiple textures can be imported together.', true)
+        return
+      }
+      void (async () => {
+        await importTextures(files.filter((file) => !/\.json$/i.test(file.name)))
+        if (!destroyed && documents[0]) await importFile(documents[0])
+      })()
+    },
+    { signal: events.signal },
+  )
+  root.addEventListener(
+    'toggle',
+    (event) => {
+      const module = event.target as HTMLDetailsElement
+      const title = module.dataset.module
+      if (!title || module.isConnected === false) return
+      if (module.open) collapsedModules.delete(title)
+      else collapsedModules.add(title)
+    },
+    { capture: true, signal: events.signal },
   )
 
   root.addEventListener(
@@ -1558,7 +1691,10 @@ export function createParticleEditor(
         event.target instanceof HTMLTextAreaElement ||
         event.target instanceof HTMLSelectElement
       const key = event.key.toLowerCase()
-      if ((event.metaKey || event.ctrlKey) && key === 's') {
+      if ((event.metaKey || event.ctrlKey) && key === 'o') {
+        event.preventDefault()
+        $<HTMLButtonElement>('[data-action="import"]').click()
+      } else if ((event.metaKey || event.ctrlKey) && key === 's') {
         event.preventDefault()
         void saveCurrent()
       } else if ((event.metaKey || event.ctrlKey) && key === 'z') {
@@ -1574,6 +1710,8 @@ export function createParticleEditor(
       } else if (key === 'r' && !typing) {
         resetPreview()
         playing = true
+      } else if (key === 'f' && !typing) {
+        $<HTMLButtonElement>('[data-action="frame"]').click()
       }
     },
     { signal: events.signal },
@@ -1604,6 +1742,7 @@ export function createParticleEditor(
       currentId = effects[0]?.id ?? ''
       setupPreview()
       renderEffects()
+      renderTextures()
       renderSystems()
       resetPreview()
       renderInspector()

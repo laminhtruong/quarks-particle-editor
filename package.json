@@ -1,9 +1,20 @@
 {
   "name": "quarks-particle-editor",
-  "version": "0.1.0",
-  "description": "An embeddable, framework-independent Three.js Quarks particle editor with project-owned data.",
+  "version": "0.2.0",
+  "description": "A local-file-first, embeddable Quarks particle editor with a Unity-inspired module inspector.",
   "type": "module",
   "license": "MIT",
+  "homepage": "https://github.com/laminhtruong/quarks-particle-editor#readme",
+  "bugs": {
+    "url": "https://github.com/laminhtruong/quarks-particle-editor/issues"
+  },
+  "keywords": [
+    "particles",
+    "quarks",
+    "threejs",
+    "editor",
+    "webgl"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/laminhtruong/quarks-particle-editor.git"
@@ -50,6 +61,6 @@
     "vitest": "^5.1.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0"
   }
 }

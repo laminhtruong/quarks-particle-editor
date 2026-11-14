@@ -193,6 +193,77 @@ describe('project-independent particle editor', () => {
     expect(editor.hasUnsavedChanges()).toBe(true)
   })
 
+  it('uses Unity-style module foldouts and remembers collapsed modules after updates', async () => {
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('data-module="Main" open')
+    root.listeners.get('toggle')?.({ target: { dataset: { module: 'Main' }, open: false } })
+    click('duplicate-system')
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('data-module="Main" >')
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain(
+      'data-module="Emission" open',
+    )
+  })
+
+  it('rejects oversized JSON without reading or replacing the current document', async () => {
+    const { editor, root } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    const text = vi.fn()
+    root.querySelector('[data-file-input]').listeners.get('change')?.({
+      target: { files: [{ name: 'huge.json', size: 64 * 1024 * 1024 + 1, text }] },
+    })
+    expect(text).not.toHaveBeenCalled()
+    expect(root.querySelector('.toast').textContent).toContain('64 MB')
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
+  })
+
+  it('retains the current effect after invalid runtime JSON is opened', async () => {
+    const { editor, root } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    const json = {
+      metadata: { type: 'Object', version: 4.7 },
+      object: {
+        type: 'Group',
+        name: 'broken',
+        children: [{ type: 'ParticleEmitter' }],
+      },
+    }
+    root.querySelector('[data-file-input]').listeners.get('change')?.({
+      target: { files: [{ name: 'broken.json', text: async () => JSON.stringify(json) }] },
+    })
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).not.toBe(''))
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('project-effect')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+  })
+
+  it('downloads JSON without a backend and keeps a discard snapshot', async () => {
+    const download = vi.fn()
+    vi.stubGlobal(
+      'document',
+      Object.assign(new ElementStub(), {
+        baseURI: 'https://example.com/',
+        createElement: () => Object.assign(new ElementStub(), { click: download }),
+      }),
+    )
+    const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:download')
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const { editor, root, click, select } = mount({
+      listEffects: async () => [effect('first'), effect('second')],
+    })
+    await editor.ready
+    click('duplicate-system')
+    click('save')
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(createUrl).toHaveBeenCalledWith(expect.any(Blob))
+    expect(revoke).toHaveBeenCalledWith('blob:download')
+    expect(root.querySelector('.toast').textContent).toContain('original file unchanged')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    click('duplicate-system')
+    select('second')
+    select('first')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+  })
+
   it('restores the last saved custom effect, not a bundled preset, on discard', async () => {
     const { editor, click, select, root } = mount({
       listEffects: async () => [effect('first'), effect('second')],
