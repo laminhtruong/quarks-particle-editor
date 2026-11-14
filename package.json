@@ -4,6 +4,10 @@
   "description": "An embeddable, framework-independent Three.js Quarks particle editor with project-owned data.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laminhtruong/quarks-particle-editor.git"
+  },
   "files": [
     "dist",
     "README.md",

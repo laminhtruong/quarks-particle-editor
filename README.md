@@ -4,6 +4,8 @@ A framework-independent browser editor for native Three.js / `three.quarks`
 particle documents. **No bundled effects, textures, game code, or backend.**
 The consuming project supplies its library and persistence callbacks.
 
+Source: [laminhtruong/quarks-particle-editor](https://github.com/laminhtruong/quarks-particle-editor).
+
 ## Install
 
 This source repository is npm-package-ready; it is not yet published to the npm
