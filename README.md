@@ -2,7 +2,7 @@
 
 A local-file-first browser editor for native Three.js / `three.quarks` particle
 documents, with a Unity-inspired workspace and foldout module inspector.
-**No bundled effects, textures, accounts, uploads, or backend required.**
+**Starts empty. No accounts, uploads, or backend required.**
 Also available as a framework-independent, embeddable npm package.
 
 Source: [laminhtruong/quarks-particle-editor](https://github.com/laminhtruong/quarks-particle-editor).
@@ -35,6 +35,14 @@ each changed effect before leaving. No data is uploaded by the editor itself;
 JSON with external texture URLs can make network requests to those URLs.
 Duplicate texture filenames are rejected instead of silently replacing assets.
 Raster files are limited to 16 MB / 8192 pixels per dimension; JSON to 64 MB.
+
+### Reference effects
+
+The optional [demo folder](demo/README.md) contains Fire, Lightning, and Poison
+effects from Bug Battle 3D, with separate texture files (not embedded in JSON).
+Import `demo/textures/*.png` first, then open a demo JSON, or drop one JSON and
+its texture files together. Demos are never loaded automatically.
+**Demo textures are not MIT-licensed; see the [asset notice](demo/ASSETS.md).**
 
 ### Familiar particle-authoring layout
 

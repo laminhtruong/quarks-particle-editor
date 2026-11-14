@@ -14,9 +14,10 @@ npm run check
 npm pack --dry-run
 ```
 
-The demo intentionally starts empty. Use your own native Quarks JSON and raster
-textures. Never commit proprietary assets, credentials, or generated `dist/`.
-Only contribute files you have permission to distribute under MIT.
+The editor intentionally starts empty. Optional reference effects live in `demo/`;
+their existing textures have separate terms in `demo/ASSETS.md`, not MIT.
+Use your own native Quarks JSON and raster textures. Never add proprietary assets,
+credentials, or generated `dist/`. New contributions must be distributable under MIT.
 
 ## Pull requests
 
