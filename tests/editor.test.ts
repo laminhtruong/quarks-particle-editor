@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataTexture, Group, MeshBasicMaterial } from 'three'
-import { BatchedRenderer, ParticleSystem } from 'three.quarks'
+import type { Object3D } from 'three'
+import { BatchedRenderer, ParticleSystem, QuarksLoader } from 'three.quarks'
 import { createParticleEditor } from '../src/index'
 import type { ParticleEditor, ParticleEditorOptions } from '../src/index'
 import { parseQuarksDocument } from '../src/document'
+import type { QuarksDocument } from '../src/document'
+import * as localFiles from '../src/local-files'
 
 const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn(), setSize: vi.fn() }))
 vi.mock('three', async (original) => ({
@@ -141,6 +144,56 @@ function mount(options?: ParticleEditorOptions) {
 }
 
 describe('project-independent particle editor', () => {
+  it('resolves textures imported after JSON without losing edits or inactive effects', async () => {
+    const pixel = new DataTexture(new Uint8Array([255, 128, 0, 255]), 1, 1)
+    const first = effect('first', new MeshBasicMaterial({ map: pixel }))
+    const second = effect('second', new MeshBasicMaterial({ map: pixel }))
+    const imageData = structuredClone(first.json.images![0]!.url)
+    first.json.images![0]!.url = 'textures/smoke.png'
+    second.json.images![0]!.url = 'textures/smoke.png'
+    const parse = QuarksLoader.prototype.parse
+    // Decode-free native scene loading; retain browser-like absolute image src values.
+    const load = vi.spyOn(QuarksLoader.prototype, 'parse').mockImplementation(function <
+      T extends Object3D,
+    >(json: QuarksDocument): T {
+      const copy = structuredClone(json)
+      for (const image of copy.images ?? []) image.url = imageData
+      const group = parse.call(new QuarksLoader(), copy) as T
+      group.traverse((object) => {
+        if (object.type === 'ParticleEmitter' && 'system' in object) {
+          const material = (object.system as ParticleSystem).material as MeshBasicMaterial
+          ;(material.map!.image as { src: string }).src = new URL(
+            String(json.images![0]!.url),
+            document.baseURI,
+          ).href
+        }
+      })
+      return group
+    })
+    const embedded = 'data:image/png;base64,aGVsbG8='
+    vi.spyOn(localFiles, 'readTextureFile').mockResolvedValue(embedded)
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click, select } = mount({
+      listEffects: async () => [first, second],
+      saveEffect,
+    })
+    await editor.ready
+    root.listeners.get('change')?.({
+      target: { dataset: { nativePath: '["ps","duration"]', nativeKind: 'number' }, value: '7' },
+    })
+    root.querySelector('[data-texture-input]').listeners.get('change')?.({
+      target: { files: [{ name: 'smoke.png' }] },
+    })
+    await vi.waitFor(() => expect(load.mock.calls.at(-1)![0].images![0]!.url).toBe(embedded))
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('value="7"')
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    expect(saveEffect.mock.calls[0]![1].images![0]!.url).toBe(embedded)
+    select('second')
+    expect(load.mock.calls.at(-1)![0].images![0]!.url).toBe(embedded)
+    expect(first.json.images![0]!.url).toBe('textures/smoke.png')
+  })
+
   it('keeps the inspector usable when a native simulation throws', async () => {
     const { editor, root, click } = mount({ listEffects: async () => [effect()] })
     await editor.ready

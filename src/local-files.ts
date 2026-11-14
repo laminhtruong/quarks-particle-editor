@@ -35,7 +35,8 @@ export function readTextureFile(file: File): Promise<string> {
 export function resolveLocalTextures(
   json: QuarksDocument,
   textures: ReadonlyMap<string, string>,
-): void {
+): boolean {
+  let changed = false
   const resolve = (url: unknown): unknown => {
     if (typeof url !== 'string' || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url)) return url
     const filename = url.split(/[?#]/)[0]!.split('/').at(-1)!
@@ -46,9 +47,12 @@ export function resolveLocalTextures(
       return url
     }
     const local = textures.get(decoded)
-    return local?.startsWith('data:image/') ? local : url
+    if (!local?.startsWith('data:image/')) return url
+    changed = true
+    return local
   }
   for (const image of json.images ?? []) {
     image.url = Array.isArray(image.url) ? image.url.map(resolve) : resolve(image.url)
   }
+  return changed
 }

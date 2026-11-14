@@ -22,8 +22,9 @@ Open the URL printed by Vite:
    create one. Unity `.prefab`, `.unity`, and `.vfx` files are not supported.
 2. Click **Import Textures** to select PNG, JPEG, WebP, or GIF files. Select a
    thumbnail in **Project** to assign it to the selected particle system.
-3. To resolve a JSON's relative image paths, import textures first, then open JSON;
-   matching is by exact filename including extension. Alternatively, drop one
+3. To resolve a JSON's relative image paths, open JSON and import textures in
+   either order; matching is by exact filename including extension. The preview
+   refreshes when matching textures arrive. Alternatively, drop one
    JSON and its textures together into the editor. Remote URLs are not rewritten.
 4. Edit modules in **Inspector**, then use Play/Pause, Restart, Step, or the
    preview scrubber to check the result.
@@ -40,8 +41,8 @@ Raster files are limited to 16 MB / 8192 pixels per dimension; JSON to 64 MB.
 
 The optional [demo folder](demo/README.md) contains Fire, Lightning, and Poison
 effects from Bug Battle 3D, with separate texture files (not embedded in JSON).
-Import `demo/textures/*.png` first, then open a demo JSON, or drop one JSON and
-its texture files together. Demos are never loaded automatically.
+Open a demo JSON and import `demo/textures/*.png` in either order, or drop one
+JSON and its texture files together. Demos are never loaded automatically.
 **Demo textures are not MIT-licensed; see the [asset notice](demo/ASSETS.md).**
 
 ### Familiar particle-authoring layout

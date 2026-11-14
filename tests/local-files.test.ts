@@ -42,6 +42,19 @@ afterEach(() => vi.unstubAllGlobals())
 const file = (name = 'smoke.png', size = 42) => ({ name, size }) as File
 
 describe('local textures', () => {
+  it('reports whether new local files resolve missing images, without replacing remote URLs', () => {
+    const json: QuarksDocument = {
+      metadata: { version: 4.7, type: 'Object' },
+      object: { type: 'Group' },
+      images: [{ url: 'textures/smoke.png' }, { url: 'https://cdn.test/smoke.png' }],
+    }
+    expect(resolveLocalTextures(json, new Map())).toBe(false)
+    const textures = new Map([['smoke.png', png]])
+    expect(resolveLocalTextures(json, textures)).toBe(true)
+    expect(json.images!.map((image) => image.url)).toEqual([png, 'https://cdn.test/smoke.png'])
+    expect(resolveLocalTextures(json, textures)).toBe(false)
+  })
+
   it('reads and decodes a raster image into an embeddable data URL', async () => {
     await expect(readTextureFile(file())).resolves.toBe(png)
   })

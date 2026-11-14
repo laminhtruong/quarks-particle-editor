@@ -786,6 +786,7 @@ export function createParticleEditor(
   }
 
   async function importTextures(files: readonly File[]): Promise<void> {
+    let imported = false
     for (const file of files) {
       if (destroyed) return
       try {
@@ -798,16 +799,28 @@ export function createParticleEditor(
         if (textures.has(file.name))
           throw new Error(`A texture named "${file.name}" is already loaded.`)
         textures.set(file.name, url)
+        imported = true
         renderTextures()
-        renderInspector()
         flash(
-          `Imported ${file.name}. Select its thumbnail to assign it, or open JSON to resolve matching texture filenames.`,
+          `Imported ${file.name}. Matching local image paths resolve automatically; select its thumbnail to assign it manually.`,
         )
       } catch (error) {
         if (!destroyed)
           flash(error instanceof Error ? error.message : 'Could not import texture', true)
       }
     }
+    if (!imported || destroyed) return
+    syncEffect()
+    let refresh = false
+    for (const effect of effects) {
+      if (resolveLocalTextures(effect.json, textures) && effect.id === currentId) refresh = true
+    }
+    if (refresh) {
+      releasePreview()
+      resetPreview()
+      markDirty()
+    }
+    renderInspector()
   }
 
   function assignTexture(id: string): void {
@@ -888,6 +901,7 @@ export function createParticleEditor(
   }
 
   function serializeGroup(group: THREE.Object3D): QuarksDocument {
+    const previous = group === currentGroup ? currentEffect()?.json : undefined
     const json = group.toJSON() as unknown as QuarksDocument
     const urls = new Map<string, string>()
     group.traverse((object) => {
@@ -926,7 +940,21 @@ export function createParticleEditor(
         textures.get(texture.name) ??
         [...textures.values()].find((url) => new URL(url, document.baseURI).href === source?.src)
       if (projectUrl) urls.set(texture.uuid, projectUrl)
-      else if (source?.src) urls.set(texture.uuid, source.src)
+      else if (source?.src) {
+        const originalTexture = (previous?.textures as NativeRecord[] | undefined)?.find(
+          (item) => item.uuid === texture.uuid,
+        )
+        const original = previous?.images?.find(
+          (image) => image.uuid === originalTexture?.image,
+        )?.url
+        // Preserve relative paths while images are missing so later local imports can resolve them.
+        urls.set(
+          texture.uuid,
+          typeof original === 'string' && new URL(original, document.baseURI).href === source.src
+            ? original
+            : source.src,
+        )
+      }
     })
     const parsed = json as unknown as {
       textures?: { uuid: string; image: string }[]
@@ -939,7 +967,6 @@ export function createParticleEditor(
       const url = urlsByImage.get(image.uuid)
       if (url) image.url = url
     }
-    const previous = group === currentGroup ? currentEffect()?.json : undefined
     if (previous) preserveNativeAssets(previous, json)
     return parseQuarksDocument(json)
   }
@@ -968,6 +995,7 @@ export function createParticleEditor(
     scene.add(batch)
     const effect = currentEffect()
     if (effect) {
+      resolveLocalTextures(effect.json, textures)
       currentGroup = new QuarksLoader().parse(structuredClone(effect.json))
       currentGroup.name = displayName(effect)
       scene.add(currentGroup)

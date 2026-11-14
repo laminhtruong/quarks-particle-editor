@@ -14,8 +14,10 @@ material, geometry, and texture settings are unchanged.
 ## Open in the editor
 
 1. Run `npm ci` and `npm run dev` from the repository root.
-2. Click **Import Textures** and select all PNG files in `demo/textures/`.
-3. Click **Open JSON** and select `Fire.json`, `Lightning.json`, or `Poison.json`.
+2. Click **Open JSON** and select `Fire.json`, `Lightning.json`, or `Poison.json`.
+3. Click **Import Textures** and select all PNG files in `demo/textures/`.
+   These two steps work in either order; matching textures refresh the preview
+   automatically, without reopening the JSON.
 4. Use Play/Restart to inspect the effect. Lightning and Poison are one-shot
    effects; restart to replay them.
 
