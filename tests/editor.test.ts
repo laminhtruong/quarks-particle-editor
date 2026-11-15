@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DataTexture, Group, MeshBasicMaterial } from 'three'
+import { DataTexture, Group, GridHelper, Mesh, MeshBasicMaterial, Scene } from 'three'
 import type { Object3D } from 'three'
 import { BatchedRenderer, ParticleSystem, QuarksLoader } from 'three.quarks'
 import { createParticleEditor } from '../src/index'
@@ -279,6 +279,21 @@ function mount(options?: ParticleEditorOptions) {
 }
 
 describe('project-independent particle editor', () => {
+  it('uses a reference grid that cannot occlude particles, without a solid preview floor', async () => {
+    const added = vi.spyOn(Scene.prototype, 'add')
+    const { editor, click } = mount({ listEffects: async () => [] })
+    await editor.ready
+    const objects = added.mock.calls.flat()
+    const grid = objects.find((object) => object instanceof GridHelper) as GridHelper
+    expect(grid).toBeDefined()
+    expect(grid.material.depthWrite).toBe(false)
+    expect(objects.some((object) => object instanceof Mesh)).toBe(false)
+    click('grid')
+    expect(grid.visible).toBe(false)
+    click('grid')
+    expect(grid.visible).toBe(true)
+  })
+
   it('toggles hierarchy systems in preview, supports undo, and omits unchecked systems on save', async () => {
     const source = effect()
     const group = new QuarksLoader().parse(source.json)

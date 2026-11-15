@@ -55,6 +55,18 @@ report is persistent in the UI after conversion and stored in
 `object.userData.unityImport` in exported JSON. It is not a lossless Unity backup.
 Keep your original package.
 
+Material tint and opacity are baked into the **Start Color** generator: Quarks
+0.17's unlit batch shader does not multiply particle colors by the material's
+color/opacity. The exported material is neutral white/alpha 1 to avoid applying
+the tint twice in other renderers. Constant, two-color and gradient start colors
+retain their modes; Color over Lifetime still multiplies the tinted start color.
+`_BaseColor` takes precedence over legacy `_TintColor` / `_Color`, including alpha
+0 or 1. Transparent blending does not make an alpha-1 particle translucent.
+Adjust Start Color's alpha to change the imported effect's opacity.
+
+The editor preview uses a reference grid without a solid floor or depth writes,
+so particles below the grid remain visible. The grid is not included in exports.
+
 Mesh import uses Three.js's FBX/OBJ parsers, without loading model textures,
 material libraries, or external URLs. The prefab's particle material remains in
 use. Old `fileIDToRecycleName` and modern `internalIDToNameTable` metadata select

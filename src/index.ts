@@ -1171,14 +1171,8 @@ export function createParticleEditor(
     scene.add(key)
     grid = new THREE.GridHelper(16, 32, 0x777777, 0x414141)
     grid.position.y = -0.025
+    grid.material.depthWrite = false
     scene.add(grid)
-    const floor = new THREE.Mesh(
-      new THREE.CircleGeometry(8, 64),
-      new THREE.MeshBasicMaterial({ color: 0x303030, transparent: true, opacity: 0.4 }),
-    )
-    floor.rotation.x = -Math.PI / 2
-    floor.position.y = -0.04
-    scene.add(floor)
     batch = new BatchedRenderer()
     scene.add(batch)
     const viewport = $<HTMLElement>('.viewport')
