@@ -13,7 +13,10 @@ const imageTypes: Record<string, string> = {
   gif: 'image/gif',
 }
 
-export async function readProjectZip(file: File) {
+export async function readProjectZip(
+  file: File,
+  onProgress?: (message: string, completed: number, total: number) => void | Promise<void>,
+) {
   if (!/\.zip$/i.test(file.name) || !file.size || file.size > 128 * MB)
     throw new Error('Choose a project .zip between 1 byte and 128 MB.')
   const bytes = new Uint8Array(await file.arrayBuffer())
@@ -72,8 +75,10 @@ export async function readProjectZip(file: File) {
     entry.start()
   })
   unzip.register(UnzipInflate)
-  for (let offset = 0; offset < bytes.length; offset += 16384)
+  for (let offset = 0; offset < bytes.length; offset += 16384) {
     unzip.push(bytes.subarray(offset, offset + 16384), offset + 16384 >= bytes.length)
+    await onProgress?.('Unpacking ZIP', Math.min(offset + 16384, bytes.length), bytes.length)
+  }
   if (names.size !== view.getUint16(end + 10, true))
     throw new Error('Truncated or inconsistent project ZIP.')
   const paths = [...entries.keys()].filter((path) => !path.startsWith('__MACOSX/'))
@@ -89,10 +94,11 @@ export async function readProjectZip(file: File) {
   const urls = new Map<string, string>()
   const files = new Map<string, Blob>()
   const textures = new Map<string, string>()
-  for (const path of paths) {
+  for (const [index, path] of paths.entries()) {
     if (!path.startsWith(prefix)) continue
     const type = imageTypes[path.split('.').at(-1)!.toLowerCase()]
     if (!type) continue
+    await onProgress?.(`Loading texture: ${path}`, index + 1, paths.length)
     const image = new File([entries.get(path)!], path.split('/').at(-1)!, { type })
     const url = await readTextureFile(image)
     urls.set(path.slice(prefix.length), url)
@@ -101,7 +107,8 @@ export async function readProjectZip(file: File) {
   }
   const decoder = new TextDecoder('utf-8', { fatal: true })
   const effects = []
-  for (const path of documents) {
+  for (const [index, path] of documents.entries()) {
+    await onProgress?.(`Reading ${path}`, index + 1, documents.length)
     const json = parseQuarksDocument(JSON.parse(decoder.decode(entries.get(path)!)))
     await resolveMeshAssets(json, async (path) => {
       const bytes = entries.get(`${prefix}${decodeURIComponent(path)}`)

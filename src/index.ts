@@ -158,6 +158,48 @@ export function createParticleEditor(
   <div class="toast" role="status" aria-live="polite" hidden></div>
 `
 
+  // Keep loading status outside the inert editor so assistive technology can announce it.
+  const loading = document.createElement('div')
+  loading.className = 'loading-overlay'
+  loading.hidden = true
+  loading.setAttribute('role', 'status')
+  loading.setAttribute('aria-live', 'polite')
+  loading.innerHTML =
+    '<div class="loading-card"><p data-loading-label></p><progress aria-label="Loading progress"></progress></div>'
+  shadow.append(loading)
+  let lastLoadingYield = 0
+
+  function setLoading(message: string, completed?: number, total?: number): boolean {
+    const first = loading.hidden === true
+    loading.hidden = false
+    root.setAttribute('aria-busy', 'true')
+    loading.querySelector('[data-loading-label]')!.textContent =
+      total === undefined ? message : `${message} (${completed}/${total})`
+    const progress = loading.querySelector('progress')!
+    if (total === undefined || !total) progress.removeAttribute('value')
+    else {
+      progress.max = total
+      progress.value = completed ?? 0
+    }
+    return first
+  }
+
+  async function showLoading(message: string, completed?: number, total?: number): Promise<void> {
+    if (destroyed) throw new DOMException('Editor closed', 'AbortError')
+    const first = setLoading(message, completed, total)
+    if (first || performance.now() - lastLoadingYield >= 32) {
+      // A task boundary lets the browser paint; awaiting an already-resolved promise does not.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+      lastLoadingYield = performance.now()
+    }
+    if (destroyed) throw new DOMException('Editor closed', 'AbortError')
+  }
+
+  function hideLoading(): void {
+    loading.hidden = true
+    root.removeAttribute('aria-busy')
+  }
+
   type NativeNode = {
     type: string
     name?: string
@@ -182,6 +224,8 @@ export function createParticleEditor(
   const systemList = $<HTMLElement>('[data-system-list]')
   const saveState = $<HTMLElement>('[data-save-state]')
   const textures = new Map<string, string>()
+  const textureFiles = new Map<string, FileSystemFileHandle>()
+  const unloadedEffects = new Set<string>()
   const defaults = new Map<string, EffectFile>()
   const savedEffects = new Map<string, EffectFile>()
   let effects: EffectFile[] = []
@@ -353,8 +397,21 @@ export function createParticleEditor(
     return defaults.has(id)
   }
 
-  function renderEffects(): void {
+  function effectMarkup(effect: EffectFile): string {
+    return `<span class="effect-icon">\u{2733}</span><span><span class="effect-name">${esc(displayName(effect))}</span><span class="effect-meta">${esc(effect.id)} \u{b7} ${emitterNodes(nativeRoot(effect.json)).length} systems</span></span>${savedIds.has(effect.id) ? '<span class="saved-dot" title="Saved to project"></span>' : ''}`
+  }
+
+  function renderEffects(currentOnly = false): void {
     const query = $<HTMLInputElement>('[data-search]').value.trim().toLowerCase()
+    const current = currentEffect()
+    const button =
+      currentOnly && !query && current
+        ? effectList.querySelector<HTMLElement>(`[data-effect="${CSS.escape(current.id)}"]`)
+        : null
+    if (button && current) {
+      button.innerHTML = effectMarkup(current)
+      return
+    }
     const visible = effects.filter((effect) =>
       `${displayName(effect)} ${effect.id}`.toLowerCase().includes(query),
     )
@@ -363,7 +420,7 @@ export function createParticleEditor(
       ? visible
           .map(
             (effect) => `
-    <button class="effect-item${effect.id === currentId ? ' active' : ''}" type="button" data-effect="${esc(effect.id)}"><span class="effect-icon">\u{2733}</span><span><span class="effect-name">${esc(displayName(effect))}</span><span class="effect-meta">${esc(effect.id)} \u{b7} ${emitterNodes(nativeRoot(effect.json)).length} systems</span></span>${savedIds.has(effect.id) ? '<span class="saved-dot" title="Saved to project"></span>' : ''}</button>`,
+    <button class="effect-item${effect.id === currentId ? ' active' : ''}" type="button" data-effect="${esc(effect.id)}">${effectMarkup(effect)}</button>`,
           )
           .join('')
       : '<div class="empty-list">No matching effects</div>'
@@ -509,7 +566,7 @@ export function createParticleEditor(
       effect.json = next
       markDirty()
       resetPreview()
-      renderEffects()
+      renderEffects(true)
       renderSystems()
       renderInspector()
     } catch (error) {
@@ -797,11 +854,12 @@ export function createParticleEditor(
   }
 
   function renderTextures(): void {
-    $('[data-texture-list]').innerHTML = textures.size
-      ? [...textures]
+    const ids = new Set([...textureFiles.keys(), ...textures.keys()])
+    $('[data-texture-list]').innerHTML = ids.size
+      ? [...ids]
           .map(
-            ([id, url]) =>
-              `<button class="texture-item" type="button" data-texture="${esc(id)}" title="Assign ${esc(id)} to selected particle system"><img src="${esc(url)}" alt=""><span>${esc(id)}</span></button>`,
+            (id) =>
+              `<button class="texture-item" type="button" data-texture="${esc(id)}" title="Load and assign ${esc(id)} to selected particle system">${textures.has(id) ? `<img loading="lazy" decoding="async" src="${esc(textures.get(id)!)}" alt="">` : '<span class="texture-placeholder" aria-hidden="true">\u{25a7}</span>'}<span>${esc(id)}</span></button>`,
           )
           .join('')
       : '<p class="empty-list">No textures. Browse or drop PNG, JPEG, WebP, or GIF files.</p>'
@@ -852,7 +910,7 @@ export function createParticleEditor(
       for (const file of files) {
         if (destroyed) return
         try {
-          if (textures.has(file.name))
+          if (textures.has(file.name) || textureFiles.has(file.name))
             throw new Error(
               `A texture named "${file.name}" is already loaded. Rename the file to import another version.`,
             )
@@ -886,6 +944,7 @@ export function createParticleEditor(
     let changed = false
     let refresh = false
     for (const effect of effects) {
+      if (unloadedEffects.has(effect.id)) continue
       if (resolveLocalTextures(effect.json, textures)) {
         changed = true
         if (effect.id === currentId) refresh = true
@@ -897,6 +956,31 @@ export function createParticleEditor(
     }
     if (changed) markDirty()
     renderInspector()
+  }
+
+  async function loadTexture(id: string): Promise<void> {
+    if (saving) return
+    const handle = textureFiles.get(id)
+    if (handle && !textures.has(id)) {
+      saving = true
+      root.inert = true
+      try {
+        await showLoading(`Loading texture: ${id}…`)
+        const url = await readTextureFile(await handle.getFile())
+        if (destroyed) return
+        textures.set(id, url)
+        renderTextures()
+      } catch (error) {
+        if (!destroyed)
+          flash(error instanceof Error ? error.message : 'Could not load texture.', true)
+        return
+      } finally {
+        saving = false
+        hideLoading()
+        if (!destroyed) root.inert = false
+      }
+    }
+    assignTexture(id)
   }
 
   function assignTexture(id: string): void {
@@ -1209,7 +1293,7 @@ export function createParticleEditor(
   function markEdit(): void {
     syncEffect()
     markDirty()
-    renderEffects()
+    renderEffects(true)
     renderSystems()
     schedulePreview()
   }
@@ -1468,7 +1552,9 @@ export function createParticleEditor(
       syncEffect()
       const revision = editRevision
       const snapshots = structuredClone(
-        options.saveEffect && !projectDirectory ? [effect!] : effects,
+        options.saveEffect && !projectDirectory
+          ? [effect!]
+          : effects.filter((item) => !unloadedEffects.has(item.id)),
       )
       if (options.saveEffect && !projectDirectory) {
         await options.saveEffect(effect!.id, exportDocument(effect!.json))
@@ -1508,7 +1594,8 @@ export function createParticleEditor(
           projectFiles.set(item.id, filenames[index]!)
       }
       if (destroyed) return
-      for (const snapshot of snapshots) savedEffects.set(snapshot.id, snapshot)
+      if (!projectDirectory && options.saveEffect)
+        for (const snapshot of snapshots) savedEffects.set(snapshot.id, snapshot)
       if (editRevision === revision) setSaved()
       renderEffects()
       renderInspector()
@@ -1542,8 +1629,38 @@ export function createParticleEditor(
     return true
   }
 
-  function selectEffect(id: string): void {
-    if (id === currentId || !effects.some((effect) => effect.id === id)) return
+  async function loadFolderEffect(
+    effect: EffectFile,
+    directory: FileSystemDirectoryHandle,
+  ): Promise<QuarksDocument> {
+    const json = structuredClone(effect.json)
+    await resolveFolderAssets(json, directory)
+    validateImportedDocument(json)
+    return json
+  }
+
+  async function selectEffect(id: string): Promise<void> {
+    const effect = effects.find((effect) => effect.id === id)
+    if (saving || id === currentId || !effect) return
+    if (unloadedEffects.has(id)) {
+      saving = true
+      root.inert = true
+      try {
+        await showLoading(`Loading ${displayName(effect)}…`)
+        const json = await loadFolderEffect(effect, projectDirectory!)
+        if (destroyed) return
+        effect.json = json
+        unloadedEffects.delete(id)
+      } catch (error) {
+        if (!destroyed)
+          flash(error instanceof Error ? error.message : 'Could not load effect.', true)
+        return
+      } finally {
+        saving = false
+        hideLoading()
+        if (!destroyed) root.inert = false
+      }
+    }
     if (!discardCurrentChanges()) return
     releasePreview()
     currentId = id
@@ -1627,6 +1744,7 @@ export function createParticleEditor(
       if (!discardCurrentChanges()) return false
       releasePreview()
       effects = effects.map((effect) => (effect.id === id ? imported : effect))
+      unloadedEffects.delete(id)
       currentId = id
       systemIndex = 0
       undoStack.length = 0
@@ -1668,6 +1786,7 @@ export function createParticleEditor(
     saving = true
     root.inert = true
     try {
+      await showLoading(`Reading ${file.name}…`)
       syncEffect()
       const incoming: { path: string; json: QuarksDocument }[] = []
       const assets = new Map<string, Blob>()
@@ -1675,10 +1794,12 @@ export function createParticleEditor(
       const report: string[] = []
       flash(`Reading ${file.name} locally…`)
       if (/\.unitypackage$/i.test(file.name)) {
-        const unity = await readUnityPackage(file)
+        const unity = await readUnityPackage(file, (bytes) =>
+          showLoading(`Unpacking ${file.name}: ${Math.round(bytes / 1024 / 1024)} MB expanded…`),
+        )
         for (const [index, path] of unity.prefabs.entries()) {
           if (destroyed) return
-          flash(`Converting ${index + 1}/${unity.prefabs.length}: ${path}`)
+          await showLoading(`Converting ${path}`, index + 1, unity.prefabs.length)
           try {
             const result = await unity.convertPrefab(path)
             incoming.push({ path, json: result.json })
@@ -1692,7 +1813,7 @@ export function createParticleEditor(
           }
         }
       } else if (/\.zip$/i.test(file.name)) {
-        const project = await readProjectZip(file)
+        const project = await readProjectZip(file, showLoading)
         incoming.push(...project.effects)
         for (const [path, blob] of project.files) assets.set(path, blob)
         for (const [id, url] of project.textures) library.set(id, url)
@@ -1700,8 +1821,9 @@ export function createParticleEditor(
       if (destroyed) return
       const staged: EffectFile[] = []
       const ids = new Set(effects.map((effect) => effect.id))
-      for (const { path, json: source } of incoming) {
+      for (const [index, { path, json: source }] of incoming.entries()) {
         if (destroyed) return
+        await showLoading(`Preparing ${path}`, index + 1, incoming.length)
         try {
           const json = structuredClone(source)
           validateImportedDocument(json)
@@ -1733,6 +1855,7 @@ export function createParticleEditor(
       }
       if (destroyed) return
       if (staged.length) {
+        await showLoading('Preparing project textures…')
         for (const [path, blob] of assets) {
           if (!blob.type.startsWith('image/')) continue
           const id = path.split('/').at(-1)!
@@ -1740,6 +1863,7 @@ export function createParticleEditor(
             library.set(id, await readTextureFile(new File([blob], id, { type: blob.type })))
         }
         if (destroyed) return
+        await showLoading('Copying project assets…')
         if (projectDirectory) await writeFolderAssets(projectDirectory, assets)
         else for (const [path, blob] of assets) await addFolderAsset(pendingAssets, path, blob)
         if (destroyed) return
@@ -1776,6 +1900,7 @@ export function createParticleEditor(
         flash(error instanceof Error ? error.message : 'Could not import effects.', true)
     } finally {
       saving = false
+      hideLoading()
       if (!destroyed) root.inert = false
     }
   }
@@ -1839,43 +1964,58 @@ export function createParticleEditor(
     root.inert = true
     try {
       const directory = await pickProjectDirectory()
+      await showLoading(`Scanning ${directory.name}…`)
       const loaded: EffectFile[] = []
       const filenames = new Map<string, string>()
+      const entries: [string, FileSystemFileHandle][] = []
       for await (const [name, handle] of directory.entries()) {
         if (handle.kind !== 'file' || !/\.json$/i.test(name)) continue
+        entries.push([name, handle])
+      }
+      for (const [index, [name, handle]] of entries.entries()) {
+        await showLoading(`Reading ${name}`, index, entries.length)
         const file = await handle.getFile()
         if (file.size > 64 * 1024 * 1024) throw new Error('JSON files must not exceed 64 MB.')
         const json = parseQuarksDocument(JSON.parse(await file.text()))
-        await resolveFolderAssets(json, directory)
-        validateImportedDocument(json)
+        prepareNativeDocument(json)
+        validateSubEmitters(json)
         const id = slug(name.replace(/\.json$/i, ''))
         if (filenames.has(id)) throw new Error(`Duplicate effect id in project: ${id}`)
         filenames.set(id, name)
         loaded.push({ id, json })
       }
-      const library = new Map<string, string>()
+      const library = new Map<string, FileSystemFileHandle>()
+      await showLoading('Indexing textures…')
       try {
         const assets = await directory.getDirectoryHandle('assets')
         const folder = await assets.getDirectoryHandle('textures')
         for await (const [name, handle] of folder.entries()) {
           if (handle.kind === 'file' && /\.(png|jpe?g|webp|gif)$/i.test(name))
-            library.set(name, await readTextureFile(await handle.getFile()))
+            library.set(name, handle)
         }
       } catch (error) {
         if (!(error instanceof Error && error.name === 'NotFoundError')) throw error
       }
+      const first = loaded[0]
+      if (first) {
+        await showLoading(`Loading ${displayName(first)}…`, entries.length, entries.length)
+        first.json = await loadFolderEffect(first, directory)
+      }
       if (destroyed) return
       releasePreview()
       effects = loaded
+      unloadedEffects.clear()
+      for (const item of loaded.slice(1)) unloadedEffects.add(item.id)
       textures.clear()
-      for (const [name, url] of library) textures.set(name, url)
+      textureFiles.clear()
+      for (const [name, handle] of library) textureFiles.set(name, handle)
       defaults.clear()
       savedIds.clear()
       savedEffects.clear()
       projectFiles.clear()
       deletedProjectFiles.clear()
       pendingAssets.clear()
-      for (const item of loaded) savedEffects.set(item.id, structuredClone(item))
+      // Folder switching keeps edits in effects; host-only discard snapshots are unnecessary here.
       for (const [id, name] of filenames) projectFiles.set(id, name)
       useProjectDirectory(directory)
       currentId = loaded[0]?.id ?? ''
@@ -1895,6 +2035,7 @@ export function createParticleEditor(
         flash(error instanceof Error ? error.message : 'Could not open project.', true)
     } finally {
       saving = false
+      hideLoading()
       if (!destroyed) root.inert = false
     }
   }
@@ -1932,11 +2073,11 @@ export function createParticleEditor(
         return
       }
       if (target.dataset.texture) {
-        assignTexture(target.dataset.texture)
+        void loadTexture(target.dataset.texture)
         return
       }
       if (target.dataset.effect) {
-        selectEffect(target.dataset.effect)
+        void selectEffect(target.dataset.effect)
         return
       }
       if (target.dataset.system !== undefined) {
@@ -2171,6 +2312,14 @@ export function createParticleEditor(
     saving = true
     root.inert = true
     try {
+      const next = effects.find((item) => item.id !== effect.id)
+      if (currentId === effect.id && next && unloadedEffects.has(next.id)) {
+        await showLoading(`Loading ${displayName(next)}…`)
+        const json = await loadFolderEffect(next, projectDirectory!)
+        if (destroyed) return
+        next.json = json
+        unloadedEffects.delete(next.id)
+      }
       if (savedIds.has(effect.id) && !projectDirectory) {
         if (!options.deleteEffect) throw new Error('This project has no delete handler')
         await options.deleteEffect(effect.id)
@@ -2182,6 +2331,7 @@ export function createParticleEditor(
         projectFiles.delete(effect.id)
       }
       effects = effects.filter((item) => item.id !== effect.id)
+      unloadedEffects.delete(effect.id)
       savedIds.delete(effect.id)
       savedEffects.delete(effect.id)
       if (currentEffect() === effect || currentId === effect.id) {
@@ -2201,6 +2351,7 @@ export function createParticleEditor(
       if (!destroyed) flash(error instanceof Error ? error.message : 'Delete failed', true)
     } finally {
       saving = false
+      hideLoading()
       if (!destroyed) root.inert = false
     }
   }
@@ -2400,6 +2551,7 @@ export function createParticleEditor(
 
   async function initialize(): Promise<void> {
     try {
+      setLoading('Loading project…')
       const [stored, textureResponse] = await Promise.all([
         options.listEffects?.() ?? [],
         options.listTextures?.() ?? [],
@@ -2410,7 +2562,8 @@ export function createParticleEditor(
         textureUrlSchema.parse(texture.url)
         textures.set(texture.id, texture.url)
       }
-      for (const saved of stored) {
+      for (const [index, saved] of stored.entries()) {
+        if (index % 25 === 24) await showLoading('Reading effects', index + 1, stored.length)
         if (savedIds.has(saved.id)) throw new Error(`Duplicate effect id: ${saved.id}`)
         const json = parseQuarksDocument(structuredClone(saved.json))
         prepareNativeDocument(json)
@@ -2442,6 +2595,8 @@ export function createParticleEditor(
           true,
         )
       throw error
+    } finally {
+      hideLoading()
     }
   }
 

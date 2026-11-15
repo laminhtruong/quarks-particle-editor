@@ -40,6 +40,26 @@ const archive = (entries: Record<string, string>, level: 0 | 6 = 6) =>
   )
 
 describe('project ZIP import', () => {
+  it('awaits progress callbacks and reports archive and document completion', async () => {
+    const file = archive({ 'fire.json': effect(), 'assets/textures/smoke.png': 'image' })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const progress = vi.fn(() => gate)
+    let completed = false
+    const reading = readProjectZip(file, progress).then((result) => {
+      completed = true
+      return result
+    })
+    await vi.waitFor(() => expect(progress).toHaveBeenCalled())
+    expect(completed).toBe(false)
+    release()
+    expect((await reading).effects).toHaveLength(1)
+    expect(progress).toHaveBeenCalledWith('Unpacking ZIP', file.size, file.size)
+    expect(progress).toHaveBeenLastCalledWith('Reading fire.json', 1, 1)
+  })
+
   it('resolves external meshes from a wrapped project and reports missing/corrupt mesh files', async () => {
     const source = meshEffect('zip-mesh')
     const bundle = await prepareFolderExport(source.json, 'https://game.test/')

@@ -19,13 +19,15 @@ npm run dev
 Open the URL printed by Vite:
 
 1. Click **Open project** (Ctrl/Cmd+O) and choose your project folder. All native
-   Quarks JSON files at its root open together, with folder-relative textures.
+   Quarks JSON files at its root are indexed together. Only the selected effect's
+   textures, meshes and runtime are loaded; visited effects stay cached for editing.
    An empty folder works for a new project; use **New effect** to add effects.
 2. In **Project → Textures**, click **Browse** to select PNG, JPEG, WebP, or GIF
    files. They are copied immediately into the project’s `assets/textures/` folder,
    even before assignment or saving. If no folder is selected, choose one first,
    then click **Browse** again to choose textures.
-   Select a thumbnail to assign the texture to the selected particle system.
+   Select a texture to load and assign it to the selected particle system. Unused
+   folder textures initially show a placeholder rather than being decoded up front.
 3. In **Effects**, click **Import** to add another project's `.zip` or all effects
    from a `.unitypackage`. You can also drop an archive, one JSON, or textures into the editor.
    Dropped JSON paths match browsed textures by exact filename including extension;
@@ -36,6 +38,13 @@ Open the URL printed by Vite:
    asking again. With no folder selected, the first save asks for one. Effect JSON
    goes at its root; images go in `assets/textures/`, mesh data in `assets/meshes/`. Undo/Redo use
    Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y), without toolbar buttons.
+
+Opening and importing display a persistent progress overlay with the current phase
+and file counts where known. Folder JSON is checked when indexed; missing/corrupt
+assets and runtime incompatibilities are reported when their effect is selected,
+without replacing the current effect or its edits. Saving leaves unopened effect
+files and their assets untouched. Archive imports still process all effects before
+adding them to the session; save and reopen the folder for on-demand asset loading.
 
 Unsaved edits stay in the current browser session; reload loses them. Save the
 project before leaving, then reopen its folder after reloading. Switching effects
