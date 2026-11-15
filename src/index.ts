@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import {
   ApplyForce,
   BatchedRenderer,
@@ -265,6 +266,7 @@ export function createParticleEditor(
   let scene: THREE.Scene
   let camera: THREE.PerspectiveCamera
   let controls: OrbitControls
+  let transformControls: TransformControls | undefined
   let batch: BatchedRenderer
   let grid: THREE.GridHelper
   let resize: ResizeObserver | undefined
@@ -379,11 +381,11 @@ export function createParticleEditor(
     effect.json = serializeGroup(currentGroup)
   }
 
-  function recordHistory(): void {
-    syncEffect()
+  function recordHistory(snapshot?: EffectFile): void {
+    if (!snapshot) syncEffect()
     const effect = currentEffect()
     if (!effect) return
-    undoStack.push(structuredClone(effect))
+    undoStack.push(structuredClone(snapshot ?? effect))
     if (undoStack.length > 100) undoStack.shift()
     redoStack.length = 0
   }
@@ -1184,6 +1186,7 @@ export function createParticleEditor(
       currentGroup.name = displayName(effect)
       scene.add(currentGroup)
       QuarksUtil.addToBatchRenderer(currentGroup, batch)
+      transformControls?.attach(currentGroup)
       previewSystems = emitters(currentGroup).map((emitter) => emitter.system)
       previewDuration = particlePreviewDuration(previewSystems)
     }
@@ -1193,6 +1196,7 @@ export function createParticleEditor(
 
   function releasePreview(): void {
     window.clearTimeout(previewTimer)
+    transformControls?.detach()
     if (currentGroup) disposeObjects(currentGroup)
     for (const system of previewSystems) system.dispose()
     previewSystems = []
@@ -1238,6 +1242,32 @@ export function createParticleEditor(
     controls.target.set(0, 1.1, 0)
     controls.minDistance = 2
     controls.maxDistance = 35
+    transformControls = new TransformControls(camera, canvas)
+    transformControls.addEventListener('dragging-changed', (event) => {
+      controls.enabled = !event.value
+    })
+    let transformStart: { position: THREE.Vector3; effect: EffectFile } | undefined
+    transformControls.addEventListener('mouseDown', () => {
+      const effect = currentEffect()
+      if (!effect || !currentGroup) return
+      syncEffect()
+      transformStart = {
+        position: currentGroup.position.clone(),
+        effect: structuredClone(effect),
+      }
+    })
+    transformControls.addEventListener('mouseUp', () => {
+      const start = transformStart
+      transformStart = undefined
+      if (!start || !currentGroup || currentGroup.position.equals(start.position)) return
+      recordHistory(start.effect)
+      syncEffect()
+      markDirty()
+      renderEffects(true)
+      renderSystems()
+      renderInspector()
+    })
+    scene.add(transformControls.getHelper())
     scene.add(new THREE.HemisphereLight(0xc4ddff, 0x242130, 1.7))
     const key = new THREE.DirectionalLight(0xffe2b1, 2.2)
     key.position.set(-4, 8, 5)
@@ -2712,6 +2742,10 @@ export function createParticleEditor(
       visibleTexturePreviews.clear()
       texturePreviewLoads.clear()
       releasePreview()
+      if (transformControls) {
+        scene.remove(transformControls.getHelper())
+        transformControls.dispose()
+      }
       if (scene) disposeObjects(scene)
       controls?.dispose()
       renderer?.dispose()

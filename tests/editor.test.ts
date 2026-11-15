@@ -23,7 +23,12 @@ import { memoryFolder } from './fixtures/folder'
 import { meshEffect } from './fixtures/mesh'
 import { prepareFolderExport } from '../src/folder-export'
 
-const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn(), setSize: vi.fn() }))
+const gpu = vi.hoisted(() => ({
+  dispose: vi.fn(),
+  controlsDispose: vi.fn(),
+  setSize: vi.fn(),
+  transformControls: undefined as any,
+}))
 vi.mock('three', async (original) => ({
   ...(await original<typeof import('three')>()),
   WebGLRenderer: class {
@@ -38,6 +43,34 @@ vi.mock('three/examples/jsm/controls/OrbitControls.js', () => ({
     target = { set: vi.fn() }
     update() {}
     dispose = gpu.controlsDispose
+  },
+}))
+vi.mock('three/examples/jsm/controls/TransformControls.js', () => ({
+  TransformControls: class {
+    helper = new Group()
+    listeners = new Map<string, (event: any) => void>()
+    object: any
+    constructor() {
+      gpu.transformControls = this
+    }
+    addEventListener(type: string, listener: (event: any) => void) {
+      this.listeners.set(type, listener)
+    }
+    attach(object: any) {
+      this.object = object
+      return this
+    }
+    detach() {
+      this.object = undefined
+      return this
+    }
+    getHelper() {
+      return this.helper
+    }
+    dispatch(type: string, event = {}) {
+      this.listeners.get(type)?.(event)
+    }
+    dispose = vi.fn()
   },
 }))
 
@@ -108,6 +141,7 @@ beforeEach(() => {
   gpu.dispose.mockClear()
   gpu.controlsDispose.mockClear()
   gpu.setSize.mockClear()
+  gpu.transformControls = undefined
   const document = Object.assign(new ElementStub(), {
     baseURI: 'https://example.com/project/',
     createElement: () => new ElementStub(),
@@ -460,6 +494,30 @@ function dropFiles(root: ElementStub, files: { name: string; [key: string]: unkn
 }
 
 describe('project-independent particle editor', () => {
+  it('moves the effect group with the viewport gizmo and keeps the move undoable', async () => {
+    const saveEffect = vi.fn(async () => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    const gizmo = gpu.transformControls
+    expect(gizmo.object).toBeInstanceOf(Group)
+    gizmo.dispatch('mouseDown')
+    const movedGroup = gizmo.object
+    movedGroup.position.set(2, 1, -3)
+    gizmo.dispatch('mouseUp')
+    expect(gizmo.object).toBe(movedGroup)
+    expect(gizmo.object.position.toArray()).toEqual([2, 1, -3])
+    expect(editor.hasUnsavedChanges()).toBe(true)
+
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledOnce())
+    const savedRoot = (saveEffect.mock.calls[0] as unknown as [string, QuarksDocument])[1]
+      .object as unknown as { matrix: number[] }
+    expect(savedRoot.matrix.slice(12, 15)).toEqual([2, 1, -3])
+
+    shortcut(root, 'z')
+    expect(gizmo.object.position.toArray()).toEqual([0, 0, 0])
+  })
+
   it('size-contains the animated timeline while preserving both scrollable asset panes', async () => {
     const { editor, root } = mount()
     await editor.ready
