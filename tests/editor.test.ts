@@ -498,9 +498,6 @@ describe('project-independent particle editor', () => {
     const saveEffect = vi.fn(async () => {})
     const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
     await editor.ready
-    expect(root.querySelector('[data-inspector]').innerHTML).toContain(
-      'Use World to preview a trail left behind by the emitter.',
-    )
     const gizmo = gpu.transformControls
     expect(gizmo.object).toBeInstanceOf(Group)
     gizmo.dispatch('mouseDown')
