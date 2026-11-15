@@ -42,6 +42,7 @@ etc.), not arbitrary binary Unity assets or VFX Graph.
 | Duration, looping, prewarm, local/world simulation space | Native Quarks parameters; custom simulation-space references are not resolved                                                     |
 | Fixed start delay on burst emission                      | Added to burst times; variable/curve delays are unsupported, and continuous emission starts immediately with a warning            |
 | Start life/speed/size, XYZ size, rotation, start color   | Native constant/range/curve/color/gradient generators; XYZ start rotation for mesh particles                                      |
+| Gravity modifier                                         | Applied as world-down acceleration using Unity's default -9.81 m/s²; package does not include project-specific physics gravity    |
 | Emission over time/distance and bursts                   | Includes count, time, cycles, interval and probability; distance emission needs host movement                                     |
 | Animation curves                                         | Unweighted Hermite tangents become cubic Bezier control points; weighted tangents are approximated                                |
 | Random between two curves                                | Uses maximum curve and warns                                                                                                      |

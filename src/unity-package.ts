@@ -11,6 +11,7 @@ import {
   DonutEmitter,
   EulerGenerator,
   FrameOverLife,
+  ForceOverLife,
   Gradient,
   GridEmitter,
   HemisphereEmitter,
@@ -757,6 +758,27 @@ async function convertPrefab(
                 ),
           ),
         )
+      const gravity = record(initial.gravityModifier)
+      const gravityMode = number(gravity.minMaxState)
+      const hasGravity =
+        gravityMode === 3
+          ? number(gravity.scalar) !== 0 || number(gravity.minScalar) !== 0
+          : [1, 2].includes(gravityMode)
+            ? number(gravity.scalar) !== 0 &&
+              array(record(gravity.maxCurve).m_Curve).some((key) => number(record(key).value) !== 0)
+            : number(initial.gravityModifier) !== 0 || number(gravity.scalar) !== 0
+      if (hasGravity)
+        behaviors.push(
+          new ForceOverLife(
+            new ConstantValue(0),
+            value(initial.gravityModifier, 0, 'Gravity Modifier', -9.81),
+            new ConstantValue(0),
+          ),
+        )
+      if (hasGravity)
+        localWarn(
+          'Gravity Modifier: using Unity default gravity (-9.81 m/s²); project settings are not in the package.',
+        )
       const rotation = record(data.RotationModule)
       if (enabled(rotation.enabled)) {
         if (geometry)
@@ -860,8 +882,6 @@ async function convertPrefab(
         localWarn('Start delay: continuous emission starts immediately; only bursts are delayed.')
       if (!geometry && enabled(initial.rotation3D))
         localWarn('3D start rotation is approximated by its Z component.')
-      if (number(initial.gravityModifier) || number(record(initial.gravityModifier).scalar))
-        localWarn('Gravity modifier is not converted.')
       if (enabled(initial.randomizeRotationDirection))
         localWarn('Randomized rotation direction is not converted.')
       localWarn(

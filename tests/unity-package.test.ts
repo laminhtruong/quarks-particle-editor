@@ -869,6 +869,83 @@ describe('Unity package import', () => {
     expect(emitter.ps.behaviors[1].size.type).toBe('PiecewiseBezier')
   })
 
+  it('applies Unity gravity as world-down acceleration in rotated local simulation', async () => {
+    const text = prefab
+      .replace(
+        'm_LocalRotation: {x: 0, y: 0, z: 0, w: 1}',
+        'm_LocalRotation: {x: -0.7071068, y: 0, z: 0, w: 0.7071068}',
+      )
+      .replace('startSpeed: {minMaxState: 0, scalar: 4}', 'startSpeed: {minMaxState: 0, scalar: 0}')
+      .replace(
+        '    startColor:',
+        '    gravityModifier: {minMaxState: 0, scalar: 2}\n    startColor:',
+      )
+    const entries = packageEntries(text)
+    delete entries[`${materialGuid}/asset`]
+    const { json, warnings } = await load(text, entries)
+    expect(warnings.join('\n')).toContain('Unity default gravity')
+    const emitterJson = (json.object as any).children[0].children[1]
+    const gravity = emitterJson.ps.behaviors.find(
+      (behavior: any) => behavior.type === 'ForceOverLife',
+    )
+    expect(gravity.y).toEqual({ type: 'ConstantValue', value: -19.62 })
+    const ranged = await load(
+      text.replace(
+        'gravityModifier: {minMaxState: 0, scalar: 2}',
+        'gravityModifier: {minMaxState: 3, minScalar: 0.5, scalar: 2}',
+      ),
+      entries,
+    )
+    const rangedGravity = (ranged.json.object as any).children[0].children[1].ps.behaviors.find(
+      (behavior: any) => behavior.type === 'ForceOverLife',
+    )
+    expect(rangedGravity.y).toEqual({ type: 'IntervalValue', a: -19.62, b: -4.905 })
+
+    const group = new QuarksLoader().parse(json)
+    new Scene().add(group)
+    group.updateMatrixWorld(true)
+    const renderer = new BatchedRenderer()
+    const systems: ParticleSystem[] = []
+    group.traverse((node) => {
+      if ('system' in node) systems.push(node.system as ParticleSystem)
+    })
+    systems.forEach((system) => renderer.addSystem(system))
+    try {
+      for (let i = 0; i < 12; i++) renderer.update(1 / 60)
+      const system = systems.find((item) =>
+        item.behaviors.some((behavior) => behavior.type === 'ForceOverLife'),
+      )!
+      expect(system.particleNum).toBeGreaterThan(0)
+      expect(system.worldSpace).toBe(false)
+      const rotation = system.emitter.getWorldQuaternion(new Quaternion())
+      for (const particle of system.particles.slice(0, system.particleNum)) {
+        const velocity = new Vector3(
+          particle.velocity.x,
+          particle.velocity.y,
+          particle.velocity.z,
+        ).applyQuaternion(rotation)
+        expect(velocity.x).toBeCloseTo(0, 6)
+        expect(velocity.y).toBeLessThan(0)
+        expect(velocity.z).toBeCloseTo(0, 6)
+      }
+    } finally {
+      systems.forEach((system) => system.dispose())
+      renderer.dispose()
+    }
+  })
+
+  it('does not treat unused minScalar as gravity in Unity constant mode', async () => {
+    const text = prefab.replace(
+      '    startColor:',
+      '    gravityModifier: {minMaxState: 0, scalar: 0, minScalar: 2}\n    startColor:',
+    )
+    const { json } = await load(text)
+    const emitter = (json.object as any).children[0].children[1]
+    expect(emitter.ps.behaviors.some((behavior: any) => behavior.type === 'ForceOverLife')).toBe(
+      false,
+    )
+  })
+
   it('delays burst-only systems without warning, while preserving zero-rate emissions', async () => {
     const text = prefab
       .replace('lengthInSec: 4', 'lengthInSec: 4\n  startDelay: {minMaxState: 0, scalar: 0.25}')
