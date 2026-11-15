@@ -33,6 +33,7 @@ import { parseQuarksDocument, textureUrlSchema, type QuarksDocument } from './do
 import { intervalBounds, particlePreviewDuration, updateParticlePreview } from './preview.js'
 import style from './style.css?inline'
 import { readTextureFile, resolveLocalTextures } from './local-files.js'
+import { readUnityPackage } from './unity-package.js'
 import {
   appendNativeItem,
   behaviorSlots,
@@ -55,6 +56,8 @@ import type { NativePath, NativeRecord, PropertyContext } from './native-propert
 export { parseQuarksDocument, quarksDocumentSchema } from './document.js'
 export type { QuarksDocument } from './document.js'
 export { intervalBounds, updateParticlePreview } from './preview.js'
+export { readUnityPackage } from './unity-package.js'
+export type { UnityPackage, UnityPrefabImport } from './unity-package.js'
 
 export interface ParticleEffect {
   id: string
@@ -104,7 +107,7 @@ export function createParticleEditor(
   <div class="studio">
     <header class="topbar">
       <div class="brand"><div class="brand-title">Quarks Particle Editor</div></div>
-      <div class="top-actions"><button class="btn" type="button" data-action="import" title="Open a native Quarks JSON file (Ctrl+O)">Open JSON</button><button class="btn" type="button" data-action="import-texture">Import Textures</button><button class="btn ghost" type="button" data-action="undo" title="Undo (Ctrl+Z)" disabled>Undo</button><button class="btn ghost" type="button" data-action="redo" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button><span class="save-state" data-save-state>No unsaved changes</span><button class="btn" type="button" data-action="export">Export JSON</button><button class="btn primary" type="button" data-action="save">${options.saveEffect ? 'Save to Project' : 'Download JSON'}</button></div>
+      <div class="top-actions"><button class="btn" type="button" data-action="import" title="Open a native Quarks JSON file (Ctrl+O)">Open JSON</button><button class="btn" type="button" data-action="import-unity">Import Unity Package</button><button class="btn" type="button" data-action="import-texture">Import Textures</button><button class="btn ghost" type="button" data-action="undo" title="Undo (Ctrl+Z)" disabled>Undo</button><button class="btn ghost" type="button" data-action="redo" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button><span class="save-state" data-save-state>No unsaved changes</span><button class="btn" type="button" data-action="export">Export JSON</button><button class="btn primary" type="button" data-action="save">${options.saveEffect ? 'Save to Project' : 'Download JSON'}</button></div>
     </header>
     <main class="workspace">
       <aside class="left-panel">
@@ -120,7 +123,7 @@ export function createParticleEditor(
         <div class="panel-tab">Scene <span class="hint">Perspective \u{b7} Quarks runtime</span></div>
         <div class="viewport">
           <canvas id="vfx-canvas" aria-label="Particle effect preview"></canvas>
-          <div class="viewport-label"><strong>Particle Effect</strong><span>Drop a JSON file or textures here</span></div>
+          <div class="viewport-label"><strong>Particle Effect</strong><span>Drop JSON, a .unitypackage, or textures here</span></div>
           <div class="viewport-actions"><button class="btn" type="button" data-action="frame">Frame</button><button class="btn" type="button" data-action="grid">Grid</button></div>
         </div>
         <div class="timeline">
@@ -130,13 +133,14 @@ export function createParticleEditor(
         <section class="project-panel" aria-label="Project assets">
           <div class="panel-tab">Project <span class="hint">Local session \u{b7} files stay in your browser</span></div>
           <div class="project-toolbar"><input class="search" type="search" placeholder="Search effects" aria-label="Search effects" data-search><button class="btn small" type="button" data-action="new">+ New effect</button><button class="btn small" type="button" data-action="duplicate" title="Duplicate selected effect">Duplicate</button></div>
-          <div class="project-columns"><section><div class="section-title"><span>Effects</span><span data-effect-count>00</span></div><div class="effect-list" data-effect-list></div></section><section><div class="section-title"><span>Textures</span><button class="btn small" type="button" data-action="import-texture">+ Browse</button></div><div class="texture-list" data-texture-list></div></section></div>
+          <div class="project-columns"><section><div class="section-title"><span>Effects</span><span data-effect-count>00</span></div><div class="effect-list" data-effect-list></div><details class="unity-import-report" data-unity-report hidden><summary>Unity import report</summary><pre data-unity-report-text></pre></details></section><section><div class="section-title"><span>Textures</span><button class="btn small" type="button" data-action="import-texture">+ Browse</button></div><div class="texture-list" data-texture-list></div></section></div>
         </section>
       </section>
       <aside class="right-panel" data-inspector></aside>
     </main>
   </div>
   <input type="file" accept="application/json,.json" hidden data-file-input>
+  <input type="file" accept=".unitypackage" hidden data-unity-input>
   <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple hidden data-texture-input>
   <input type="file" accept="application/json,.json" hidden data-geometry-input>
   <div class="toast" role="status" aria-live="polite" hidden></div>
@@ -1637,37 +1641,130 @@ export function createParticleEditor(
       .text()
       .then((text) => {
         if (destroyed) return
-        const json = parseQuarksDocument(JSON.parse(text))
-        resolveLocalTextures(json, textures)
-        prepareNativeDocument(json)
-        validateSubEmitters(json)
-        // Validate runtime compatibility before replacing any in-session document.
-        const probe = new QuarksLoader().parse(structuredClone(json))
-        disposeObjects(probe)
-        for (const emitter of emitters(probe)) emitter.system.dispose()
-        const name = String(nativeRoot(json).name || file.name.replace(/\.json$/i, ''))
-        const id = slug(name)
-        const imported = { id, json }
-        if (effects.some((effect) => effect.id === id)) {
-          if (!window.confirm(`Replace the current "${id}" document with this file?`)) return
-          if (!discardCurrentChanges()) return
-          releasePreview()
-          effects = effects.map((effect) => (effect.id === id ? imported : effect))
-          currentId = id
-          systemIndex = 0
-          undoStack.length = 0
-          redoStack.length = 0
-          updateHistoryButtons()
-          markDirty()
-          renderEffects()
-          renderSystems()
-          resetPreview()
-          renderInspector()
-        } else addNewEffect(name, imported)
+        importDocument(parseQuarksDocument(JSON.parse(text)), file.name.replace(/\.json$/i, ''))
       })
       .catch((error: unknown) => {
         if (!destroyed) flash(error instanceof Error ? error.message : 'Invalid Quarks JSON', true)
       })
+  }
+
+  function importDocument(json: QuarksDocument, fallbackName: string): boolean {
+    resolveLocalTextures(json, textures)
+    prepareNativeDocument(json)
+    validateSubEmitters(json)
+    // Validate runtime compatibility before replacing any in-session document.
+    const probe = new QuarksLoader().parse(structuredClone(json))
+    disposeObjects(probe)
+    for (const emitter of emitters(probe)) emitter.system.dispose()
+    const name = String(nativeRoot(json).name || fallbackName)
+    const id = slug(name)
+    const imported = { id, json }
+    if (effects.some((effect) => effect.id === id)) {
+      if (!window.confirm(`Replace the current "${id}" document with this file?`)) return false
+      if (!discardCurrentChanges()) return false
+      releasePreview()
+      effects = effects.map((effect) => (effect.id === id ? imported : effect))
+      currentId = id
+      systemIndex = 0
+      undoStack.length = 0
+      redoStack.length = 0
+      updateHistoryButtons()
+      markDirty()
+      renderEffects()
+      renderSystems()
+      resetPreview()
+      renderInspector()
+    } else {
+      addNewEffect(name, imported)
+      if (currentId !== id) return false
+    }
+    return true
+  }
+
+  let importingUnity = false
+  async function importUnityFile(file: File): Promise<void> {
+    if (importingUnity) {
+      flash('Finish or cancel the current Unity package import first.', true)
+      return
+    }
+    importingUnity = true
+    let dialog: HTMLDialogElement | undefined
+    try {
+      flash('Reading Unity package locally…')
+      const unity = await readUnityPackage(file)
+      if (destroyed) {
+        importingUnity = false
+        return
+      }
+      dialog = document.createElement('dialog')
+      dialog.className = 'name-dialog'
+      dialog.setAttribute('aria-label', 'Import Unity prefab')
+      dialog.innerHTML = `<form class="modal"><h2>Import Unity prefab</h2><p>Choose one prefab to convert. Reopen the package to import another. Export from Unity with Include dependencies enabled.</p><label class="field"><span>Prefab (${unity.prefabs.length})</span><select name="prefab" aria-label="Unity prefab">${unity.prefabs.map((path, index) => `<option value="${index}">${esc(path)}</option>`).join('')}</select></label><p>Shuriken text prefabs only. Unsupported features are listed in the import report; Unity shaders cannot be reproduced exactly.</p><p role="status" aria-live="polite" data-unity-status></p><div class="modal-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Convert &amp; import</button></div></form>`
+      const chooser = dialog
+      const close = () => {
+        chooser.remove()
+        importingUnity = false
+      }
+      chooser.addEventListener(
+        'cancel',
+        (event) => {
+          event.preventDefault()
+          close()
+        },
+        { signal: events.signal },
+      )
+      chooser
+        .querySelector('[data-cancel]')!
+        .addEventListener('click', close, { signal: events.signal })
+      chooser.querySelector('form')!.addEventListener(
+        'submit',
+        (event) => {
+          event.preventDefault()
+          const submit = chooser.querySelector<HTMLButtonElement>('[type="submit"]')!
+          if (submit.disabled) return
+          const path =
+            unity.prefabs[Number(chooser.querySelector<HTMLSelectElement>('select')!.value)]
+          if (!path) return
+          submit.disabled = true
+          const status = chooser.querySelector<HTMLElement>('[data-unity-status]')!
+          status.textContent = 'Converting prefab and embedding textures…'
+          void unity
+            .convertPrefab(path)
+            .then((result) => {
+              if (destroyed || !chooser.isConnected) return
+              if (!importDocument(result.json, path)) {
+                status.textContent = 'Import cancelled. Your current effect was kept.'
+                return
+              }
+              const report = $<HTMLDetailsElement>('[data-unity-report]')
+              $('[data-unity-report-text]').textContent =
+                `${path}\n${result.particleCount} Particle System(s) converted.\n\n${result.warnings.join('\n') || 'No conversion warnings.'}`
+              report.hidden = false
+              report.open = true
+              close()
+              flash(
+                `Imported ${result.particleCount} Particle System(s). Check the Unity import report, then Download JSON.`,
+              )
+            })
+            .catch((error: unknown) => {
+              if (!destroyed && chooser.isConnected)
+                status.textContent =
+                  error instanceof Error ? error.message : 'Could not convert Unity prefab.'
+            })
+            .finally(() => {
+              submit.disabled = false
+            })
+        },
+        { signal: events.signal },
+      )
+      root.append(chooser)
+      chooser.showModal()
+    } catch (error) {
+      dialog?.remove()
+      importingUnity = false
+      if (!destroyed)
+        flash(error instanceof Error ? error.message : 'Could not import Unity package.', true)
+    }
   }
 
   function exportCurrent(): void {
@@ -1742,6 +1839,10 @@ export function createParticleEditor(
       if (action === 'save') void saveCurrent()
       else if (action === 'import') {
         const input = $<HTMLInputElement>('[data-file-input]')
+        input.value = ''
+        input.click()
+      } else if (action === 'import-unity') {
+        const input = $<HTMLInputElement>('[data-unity-input]')
         input.value = ''
         input.click()
       } else if (action === 'import-texture') {
@@ -2193,6 +2294,15 @@ export function createParticleEditor(
     { signal: events.signal },
   )
 
+  $<HTMLInputElement>('[data-unity-input]').addEventListener(
+    'change',
+    (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0]
+      if (file) void importUnityFile(file)
+    },
+    { signal: events.signal },
+  )
+
   $<HTMLInputElement>('[data-geometry-input]').addEventListener(
     'change',
     (event) => {
@@ -2245,6 +2355,13 @@ export function createParticleEditor(
     (event) => {
       event.preventDefault()
       const files = Array.from(event.dataTransfer?.files ?? [])
+      const packages = files.filter((file) => /\.unitypackage$/i.test(file.name))
+      if (packages.length) {
+        if (files.length !== 1)
+          flash('Drop one .unitypackage at a time, without other files.', true)
+        else void importUnityFile(packages[0]!)
+        return
+      }
       const documents = files.filter((file) => /\.json$/i.test(file.name))
       if (documents.length > 1) {
         flash('Open one JSON document at a time. Multiple textures can be imported together.', true)

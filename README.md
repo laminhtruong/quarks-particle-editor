@@ -18,8 +18,9 @@ npm run dev
 
 Open the URL printed by Vite:
 
-1. Click **Open JSON** to browse a native Quarks effect, or **New effect** to
-   create one. Unity `.prefab`, `.unity`, and `.vfx` files are not supported.
+1. Click **Open JSON** to browse a native Quarks effect, **Import Unity Package**
+   to convert a `.unitypackage`, or **New effect** to create one. Standalone Unity
+   `.prefab`, `.unity`, and `.vfx` files are not accepted.
 2. Click **Import Textures** to select PNG, JPEG, WebP, or GIF files. Select a
    thumbnail in **Project** to assign it to the selected particle system.
 3. To resolve a JSON's relative image paths, open JSON and import textures in
@@ -36,6 +37,31 @@ each changed effect before leaving. No data is uploaded by the editor itself;
 JSON with external texture URLs can make network requests to those URLs.
 Duplicate texture filenames are rejected instead of silently replacing assets.
 Raster files are limited to 16 MB / 8192 pixels per dimension; JSON to 64 MB.
+
+### Import Unity particle prefabs
+
+In Unity, set **Asset Serialization → Force Text**, then export your prefab as a
+`.unitypackage` with **Include dependencies** enabled. Click **Import Unity
+Package** (or drop the package), choose a prefab, and click **Convert & import**.
+Each import converts one prefab, including all its Shuriken Particle Systems and
+inactive children. Reopen the package to choose another prefab. Inspect the
+persistent **Unity import report**, preview/edit the result, then **Download JSON**.
+Supported raster textures are embedded in the native JSON; no Unity installation,
+server, or upload is needed during conversion.
+
+The importer maps hierarchy/transforms, main start values, emission rates/bursts,
+common shapes, size/color/Z-rotation over lifetime, grid texture-sheet animation,
+and basic particle material/tint/blending/UV settings. GUIDs resolve dependencies,
+not filenames. Conversion warnings and the source path are also saved in the
+root's `userData.unityImport`.
+
+**This is an approximate converter, not Unity playback.** Unity shaders are replaced
+with unlit Quarks particle materials. Missing dependencies, unsupported modules,
+textures and approximations are reported. Binary prefabs, nested prefabs and
+variants are rejected: unpack completely in Unity and re-export as text. VFX Graph,
+scripts, animation controllers, mesh assets, trails, physics and sub-emitter links
+are not converted. TGA/PSD/EXR and other non-browser image formats need conversion
+to PNG before export. See [the exact scope](docs/unity-import.md).
 
 ### Reference effects
 
@@ -56,9 +82,9 @@ JSON and its texture files together. Demos are never loaded automatically.
 - Space: play/pause; R: restart; F: frame; Ctrl/Cmd+O: open;
   Ctrl/Cmd+S: download/save; Ctrl/Cmd+Z / Shift+Z: undo/redo.
 
-This is **Unity-inspired, not a Unity clone or compatibility layer**. It edits
-Quarks behavior only: no fake Unity modules, Unity asset importer, or copied
-Unity artwork. The inspector exposes all **19 registered behaviors**, **9 registered
+This is **Unity-inspired, not a Unity clone or compatibility runtime**. It edits
+native Quarks behavior; Unity package conversion is best-effort and does not add
+Unity-only modules or copied Unity artwork. The inspector exposes all **19 registered behaviors**, **9 registered
 shapes**, **12 generator modes**, and **6 render modes** in `three.quarks` 0.17.1.
 There are forms for native cubic curve controls, gradient/color/alpha keys,
 multiple bursts, vectors, rotations, renderer settings, materials, and textures.

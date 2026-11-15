@@ -129,7 +129,9 @@ checks are not a sandbox for hostile JSON or an unlimited GPU resource guarantee
   rotation settings instead of modifying the runtime.
 - Unsupported/unregistered behaviors and top-level generators are rejected on
   import, rather than silently disappearing or becoming Constant 0 on re-save.
-- Unity-only modules and Unity prefab/VFX Graph import are outside this package.
+- Unity-only runtime modules and VFX Graph playback are outside this package.
+  `.unitypackage` import offers [best-effort Shuriken conversion](unity-import.md),
+  not Unity runtime compatibility or direct standalone prefab import.
 
 No runtime expansion, Unity emulation, or dependency upgrade is required for
 any feature listed as supported above.

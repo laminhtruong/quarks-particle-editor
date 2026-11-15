@@ -962,3 +962,14 @@ button.hierarchy-row:hover {
     display: none;
   }
 }
+.unity-import-report {
+  margin: 8px;
+  font-size: 12px;
+}
+
+.unity-import-report pre {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

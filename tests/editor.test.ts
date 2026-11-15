@@ -7,6 +7,7 @@ import type { ParticleEditor, ParticleEditorOptions } from '../src/index'
 import { parseQuarksDocument } from '../src/document'
 import type { QuarksDocument } from '../src/document'
 import * as localFiles from '../src/local-files'
+import * as unityPackages from '../src/unity-package'
 
 const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn(), setSize: vi.fn() }))
 vi.mock('three', async (original) => ({
@@ -111,6 +112,140 @@ beforeEach(() => {
       throw new Error('Editor must not fetch project APIs')
     }),
   )
+})
+
+describe('Unity package import workflow', () => {
+  beforeEach(() => {
+    vi.spyOn(document, 'createElement').mockImplementation(
+      () => Object.assign(new ElementStub(), { showModal() {} }) as unknown as HTMLElement,
+    )
+  })
+  const choosePackage = (root: ElementStub, name = 'effects.unitypackage') => {
+    root.querySelector('[data-unity-input]').listeners.get('change')?.({
+      target: { files: [{ name }] },
+    })
+  }
+  const chooserFor = async (root: ElementStub) => {
+    await vi.waitFor(() => expect(root.children).toHaveLength(1))
+    const chooser = root.children[0]!
+    Object.defineProperty(chooser, 'isConnected', { get: () => root.children.includes(chooser) })
+    chooser.querySelector('select').value = '0'
+    return chooser
+  }
+  const submit = (chooser: ElementStub) =>
+    chooser.querySelector('form').listeners.get('submit')?.({ preventDefault() {} })
+
+  it('imports the selected prefab, displays a persistent report, and saves native JSON', async () => {
+    const source = effect('converted')
+    const convertPrefab = vi.fn(async () => ({
+      json: source.json,
+      warnings: ['Unsupported NoiseModule'],
+      particleCount: 1,
+    }))
+    const read = vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
+      prefabs: ['Assets/Fire.prefab', 'Assets/Smoke.prefab'],
+      convertPrefab,
+    })
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ saveEffect })
+    await editor.ready
+    expect(root.innerHTML).toContain('Import Unity Package')
+    choosePackage(root)
+    const chooser = await chooserFor(root)
+    expect(chooser.innerHTML).toContain('Assets/Smoke.prefab')
+    chooser.querySelector('select').value = '1'
+    submit(chooser)
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('01'))
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(convertPrefab).toHaveBeenCalledWith('Assets/Smoke.prefab')
+    expect(root.querySelector('[data-unity-report-text]').textContent).toContain(
+      'Unsupported NoiseModule',
+    )
+    expect(root.children).toHaveLength(0)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    expect(saveEffect.mock.calls[0]![0]).toBe('converted')
+    expect(saveEffect.mock.calls[0]![1].object.type).toBe('Group')
+  })
+
+  it('keeps current edits intact on conversion failure or cancelled replacement', async () => {
+    const convertPrefab = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Nested prefab is unsupported'))
+      .mockResolvedValue({ json: effect().json, warnings: [], particleCount: 1 })
+    vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
+      prefabs: ['Assets/Fire.prefab'],
+      convertPrefab,
+    })
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('duplicate-system')
+    choosePackage(root)
+    const chooser = await chooserFor(root)
+    submit(chooser)
+    await vi.waitFor(() =>
+      expect(chooser.querySelector('[data-unity-status]').textContent).toBe(
+        'Nested prefab is unsupported',
+      ),
+    )
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    vi.mocked((browser as unknown as Window).confirm).mockReturnValue(false)
+    submit(chooser)
+    await vi.waitFor(() =>
+      expect(chooser.querySelector('[data-unity-status]').textContent).toContain(
+        'Import cancelled',
+      ),
+    )
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
+  it('routes package drops separately and prevents concurrent imports and mixed-file drops', async () => {
+    const read = vi
+      .spyOn(unityPackages, 'readUnityPackage')
+      .mockResolvedValue({ prefabs: ['Assets/Fire.prefab'], convertPrefab: vi.fn() })
+    const { editor, root } = mount()
+    await editor.ready
+    const drop = (names: string[]) =>
+      root.listeners.get('drop')?.({
+        preventDefault() {},
+        dataTransfer: { files: names.map((name) => ({ name })) },
+      })
+    drop(['a.unitypackage', 'b.json'])
+    expect(read).not.toHaveBeenCalled()
+    drop(['a.unitypackage'])
+    const chooser = await chooserFor(root)
+    choosePackage(root)
+    expect(read).toHaveBeenCalledTimes(1)
+    chooser.querySelector('[data-cancel]').listeners.get('click')?.({})
+    expect(root.children).toHaveLength(0)
+    choosePackage(root)
+    await chooserFor(root)
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores conversion completion after the dialog was cancelled', async () => {
+    let finish!: (value: unityPackages.UnityPrefabImport) => void
+    vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
+      prefabs: ['Assets/Fire.prefab'],
+      convertPrefab: () =>
+        new Promise((resolve) => {
+          finish = resolve
+        }),
+    })
+    const { editor, root } = mount()
+    await editor.ready
+    choosePackage(root)
+    const chooser = await chooserFor(root)
+    submit(chooser)
+    chooser.listeners.get('cancel')?.({ preventDefault() {} })
+    finish({ json: effect('late').json, warnings: [], particleCount: 1 })
+    await Promise.resolve()
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('00')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+  })
 })
 
 afterEach(() => {
