@@ -414,7 +414,7 @@ describe('Unity package import', () => {
     async (rotation3D, worldSpace) => {
       const source = meshEntries()
       const text = source.text
-        .replace('moveWithTransform: 1', `moveWithTransform: ${Number(!worldSpace)}`)
+        .replace('moveWithTransform: 1', `moveWithTransform: ${Number(worldSpace)}`)
         .replace(
           'startRotation: {',
           `rotation3D: ${Number(rotation3D)}\n    startRotationX: {scalar: 0.1}\n    startRotationY: {scalar: 0.2}\n    startRotation: {`,
@@ -467,7 +467,7 @@ describe('Unity package import', () => {
         .replace('type: 4\n    angle: 30', 'type: 12\n    angle: 30')
         .replace('radius: {value: 0.25}', `radius: {value: ${radius}}`)
         .replace('startSpeed: {minMaxState: 0, scalar: 4}', `startSpeed: {scalar: ${speed}}`)
-        .replace('moveWithTransform: 1', `moveWithTransform: ${worldSpace ? 0 : 1}`)
+        .replace('moveWithTransform: 1', `moveWithTransform: ${Number(worldSpace)}`)
       const entries = packageEntries(text)
       delete entries[`${materialGuid}/asset`]
       const { json, warnings } = await load(text, entries)
@@ -805,7 +805,6 @@ describe('Unity package import', () => {
     'keeps world-space %s velocity radial after handedness conversion and a JSON round trip',
     async (_, speed, radius, mode) => {
       const text = prefab
-        .replace('moveWithTransform: 1', 'moveWithTransform: 0')
         .replace('type: 4\n    angle: 30', 'type: 0\n    radiusThickness: 0\n    angle: 30')
         .replace('radius: {value: 0.25}', `radius: {value: ${radius}}`)
         .replace('startSpeed: {minMaxState: 0, scalar: 4}', `startSpeed: {scalar: ${speed}}`)
@@ -878,6 +877,7 @@ describe('Unity package import', () => {
 
   it('applies Unity gravity as world-down acceleration in rotated local simulation', async () => {
     const text = prefab
+      .replace('moveWithTransform: 1', 'moveWithTransform: 0')
       .replace(
         'm_LocalRotation: {x: 0, y: 0, z: 0, w: 1}',
         'm_LocalRotation: {x: -0.7071068, y: 0, z: 0, w: 0.7071068}',
@@ -937,6 +937,58 @@ describe('Unity package import', () => {
       }
     } finally {
       systems.forEach((system) => system.dispose())
+      renderer.dispose()
+    }
+  })
+
+  it.each([
+    [0, false],
+    [1, true],
+    [2, false],
+  ])('maps Unity simulation-space enum %i correctly', async (unitySpace, worldSpace) => {
+    const { json, warnings } = await load(
+      prefab.replace('moveWithTransform: 1', `moveWithTransform: ${unitySpace}`),
+    )
+    const emitter = (json.object as any).children[0].children[1]
+    expect(emitter.ps.worldSpace).toBe(worldSpace)
+    if (unitySpace === 2)
+      expect(warnings.join('\n')).toContain('Custom simulation-space transform is not converted')
+  })
+
+  it('keeps world-space distance emissions along a moving group path', async () => {
+    const text = prefab
+      .replace(
+        'rateOverTime: {minMaxState: 0, scalar: 20}',
+        'rateOverTime: {minMaxState: 0, scalar: 0}',
+      )
+      .replace('startSpeed: {minMaxState: 0, scalar: 4}', 'startSpeed: {minMaxState: 0, scalar: 0}')
+    const { json } = await load(text)
+    const probe = structuredClone(json)
+    delete probe.images
+    delete probe.textures
+    for (const material of probe.materials as Record<string, unknown>[]) delete material.map
+    const group = new QuarksLoader().parse(probe)
+    new Scene().add(group)
+    const renderer = new BatchedRenderer()
+    const systems: ParticleSystem[] = []
+    group.traverse((node) => {
+      if ('system' in node) systems.push(node.system as ParticleSystem)
+    })
+    systems.forEach((system) => renderer.addSystem(system))
+    const system = systems.find((item) => item.worldSpace)!
+    try {
+      group.updateMatrixWorld(true)
+      renderer.update(1 / 60)
+      for (let i = 1; i <= 20; i++) {
+        group.position.x = i * 0.2
+        group.updateMatrixWorld(true)
+        renderer.update(1 / 60)
+      }
+      const x = system.particles.slice(0, system.particleNum).map((particle) => particle.position.x)
+      expect(system.particleNum).toBeGreaterThanOrEqual(5)
+      expect(Math.max(...x) - Math.min(...x)).toBeGreaterThan(1.5)
+    } finally {
+      systems.forEach((item) => item.dispose())
       renderer.dispose()
     }
   })

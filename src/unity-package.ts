@@ -869,7 +869,10 @@ async function convertPrefab(
         )
           localWarn(`${key} is enabled but not converted.`)
       if (number(data.simulationSpeed, 1) !== 1) localWarn('Simulation speed is not converted.')
-      if (fileId(data.moveWithCustomTransform) !== '0')
+      const simulationSpace = number(data.moveWithTransform)
+      if (![0, 1, 2].includes(simulationSpace))
+        localWarn(`Unknown simulation space ${simulationSpace}; using local space.`)
+      if (simulationSpace === 2 || fileId(data.moveWithCustomTransform) !== '0')
         localWarn('Custom simulation-space transform is not converted.')
       if (delayMode !== 0) localWarn('Random/curve start delay is not converted.')
       if (
@@ -899,7 +902,7 @@ async function convertPrefab(
         duration: number(data.lengthInSec, 5),
         looping: enabled(data.looping),
         prewarm: enabled(data.prewarm),
-        worldSpace: !enabled(data.moveWithTransform ?? 1),
+        worldSpace: simulationSpace === 1,
         shape: shape(data.ShapeModule, localWarn, !!geometry),
         startLife: value(initial.startLifetime, 5, 'Start Lifetime'),
         startSpeed: value(initial.startSpeed, 5, 'Start Speed'),
