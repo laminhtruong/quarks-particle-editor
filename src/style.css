@@ -350,6 +350,8 @@ button.hierarchy-row:hover {
   gap: 3px;
 }
 .timeline {
+  /* Its grid row fixes its size; animated contents must not invalidate asset-list sizing. */
+  contain: strict;
   padding: 5px 12px 10px;
   border-top: 1px solid var(--line);
   background: #363636;
@@ -430,6 +432,8 @@ button.hierarchy-row:hover {
   min-height: 0;
 }
 .project-columns > section {
+  /* Size-contained asset panes stay out of animated timeline layout. */
+  contain: strict;
   min-width: 0;
   padding: 7px;
   overflow: auto;
@@ -1290,10 +1294,12 @@ input[type='checkbox'] {
     border-left: 0;
   }
   .project-columns {
+    contain: strict;
     grid-template-columns: 1fr;
     overflow: auto;
   }
   .project-columns > section {
+    contain: none;
     overflow: visible;
   }
   .project-columns > section + section {

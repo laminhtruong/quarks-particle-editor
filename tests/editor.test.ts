@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataTexture, Group, GridHelper, Mesh, MeshBasicMaterial, Scene } from 'three'
 import type { Object3D } from 'three'
@@ -430,6 +431,18 @@ function dropFiles(root: ElementStub, files: { name: string; [key: string]: unkn
 }
 
 describe('project-independent particle editor', () => {
+  it('size-contains the animated timeline while preserving both scrollable asset panes', async () => {
+    const { editor, root } = mount()
+    await editor.ready
+    const style = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
+    const assetPaneRule = style.match(/\.project-columns\s*>\s*section\s*\{([^}]+)\}/)?.[1]
+    expect(assetPaneRule).toMatch(/contain:\s*strict\s*(;|$)/)
+    expect(assetPaneRule).toMatch(/overflow:\s*auto\s*(;|$)/)
+    expect(style.match(/\.timeline\s*\{([^}]+)\}/)?.[1]).toMatch(/contain:\s*strict\s*(;|$)/)
+    expect(root.innerHTML).toMatch(/<section><div[^\n]+data-effect-list/)
+    expect(root.innerHTML).toMatch(/<section><div[^\n]+data-texture-list/)
+  })
+
   it('shows progress during initial host loading', async () => {
     let finish!: (effects: ReturnType<typeof effect>[]) => void
     const { editor, container } = mount({

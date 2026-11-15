@@ -333,6 +333,10 @@ npm run check     # Types, formatting, unit tests, build
 npm pack --dry-run
 ```
 
+Set `CHROME_PATH` to a Chrome/Chromium executable to include the real-browser
+preview layout regression in `npm test`. It compares full and filtered asset lists
+while the same particle simulation runs; without Chrome this test is skipped.
+
 The build is ESM JavaScript plus TypeScript declarations. Application consumers
 do not need Vite. Run `npm pack` again after changing the package, then reinstall
 the resulting tarball in the consuming project. Publishing to npm is a separate,
