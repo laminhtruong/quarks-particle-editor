@@ -510,7 +510,12 @@ async function convertPrefab(
             `${image.path}: texture format is not supported; convert it to PNG in Unity before exporting.`,
           )
         else {
-          const url = await readTextureFile(new File([image.data], image.path.split('/').at(-1)!))
+          const extension = image.path.split('.').at(-1)!.toLowerCase()
+          const url = await readTextureFile(
+            new File([image.data], image.path.split('/').at(-1)!, {
+              type: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
+            }),
+          )
           texture = new THREE.Texture()
           texture.name = image.path
           texture.colorSpace = THREE.SRGBColorSpace

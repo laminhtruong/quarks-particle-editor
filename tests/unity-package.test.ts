@@ -25,6 +25,24 @@ const load = async (text = prefab, entries = packageEntries(text)) => {
 }
 
 describe('Unity package import', () => {
+  it.each([
+    ['star.png', 'image/png'],
+    ['star.JPG', 'image/jpeg'],
+    ['star.jpeg', 'image/jpeg'],
+    ['star.webp', 'image/webp'],
+    ['star.gif', 'image/gif'],
+  ])('sets the browser MIME type when reconstructing %s from archive bytes', async (name, type) => {
+    const entries = packageEntries()
+    entries[`${textureGuid}/pathname`] = `Assets/Textures/${name}`
+    await load(prefab, entries)
+    expect(readTextureFile).toHaveBeenLastCalledWith(expect.objectContaining({ name, type }))
+  })
+
+  it('still rejects a texture when image decoding fails', async () => {
+    vi.mocked(readTextureFile).mockRejectedValueOnce(new Error('Could not decode Fire.png'))
+    await expect(load()).rejects.toThrow('Could not decode Fire.png')
+  })
+
   it('lists all prefab paths, leaving conversion to the selected prefab', async () => {
     const entries = packageEntries()
     entries['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pathname'] = 'Assets/Other.prefab'
