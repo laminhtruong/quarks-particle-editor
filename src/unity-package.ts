@@ -283,15 +283,9 @@ function scalar(value: unknown, fallback: number, warn: Warn, label: string, fac
   return new PiecewiseBezier(curves)
 }
 
-function rgba(value: unknown, tint?: QVector4): QVector4 {
+function rgba(value: unknown): QVector4 {
   const data = record(value)
-  const result = new QVector4(
-    number(data.r, 1),
-    number(data.g, 1),
-    number(data.b, 1),
-    number(data.a, 1),
-  )
-  return tint ? result.multiply(tint) : result
+  return new QVector4(number(data.r, 1), number(data.g, 1), number(data.b, 1), number(data.a, 1))
 }
 
 function lifetimeValue(value: Scalar, warn: Warn, label: string): PiecewiseBezier {
@@ -302,21 +296,21 @@ function lifetimeValue(value: Scalar, warn: Warn, label: string): PiecewiseBezie
   return new PiecewiseBezier([[new Bezier(n, n, n, n), 0]])
 }
 
-function gradient(value: unknown, warn: Warn, label: string, tint?: QVector4): Gradient {
+function gradient(value: unknown, warn: Warn, label: string): Gradient {
   const data = record(value)
   if (number(data.m_Mode) !== 0)
     warn(`${label}: fixed/perceptual gradient interpolation is approximated as linear.`)
   const colors: [QVector3, number][] = []
   const alphas: [number, number][] = []
   for (let i = 0; i < Math.min(8, number(data.m_NumColorKeys, 2)); i++) {
-    const color = rgba(data[`key${i}`], tint)
+    const color = rgba(data[`key${i}`])
     colors.push([
       new QVector3(color.x, color.y, color.z),
       number(data[`ctime${i}`], i ? 65535 : 0) / 65535,
     ])
   }
   for (let i = 0; i < Math.min(8, number(data.m_NumAlphaKeys, 2)); i++)
-    alphas.push([rgba(data[`key${i}`], tint).w, number(data[`atime${i}`], i ? 65535 : 0) / 65535])
+    alphas.push([rgba(data[`key${i}`]).w, number(data[`atime${i}`], i ? 65535 : 0) / 65535])
   if (!colors.length || !alphas.length) throw new Error(`${label}: gradient has no keys.`)
   return new Gradient(
     colors.sort((a, b) => a[1] - b[1]),
@@ -324,28 +318,23 @@ function gradient(value: unknown, warn: Warn, label: string, tint?: QVector4): G
   )
 }
 
-function color(
-  value: unknown,
-  warn: Warn,
-  label: string,
-  tint?: QVector4,
-): ColorGenerator | FunctionColorGenerator {
+function color(value: unknown, warn: Warn, label: string): ColorGenerator | FunctionColorGenerator {
   const data = record(value)
   switch (number(data.minMaxState)) {
     case 0:
-      return new ConstantColor(rgba(data.maxColor, tint))
+      return new ConstantColor(rgba(data.maxColor))
     case 1:
-      return gradient(data.maxGradient, warn, label, tint)
+      return gradient(data.maxGradient, warn, label)
     case 2:
-      return new ColorRange(rgba(data.minColor, tint), rgba(data.maxColor, tint))
+      return new ColorRange(rgba(data.minColor), rgba(data.maxColor))
     case 3:
       return new RandomColorBetweenGradient(
-        gradient(data.minGradient, warn, label, tint),
-        gradient(data.maxGradient, warn, label, tint),
+        gradient(data.minGradient, warn, label),
+        gradient(data.maxGradient, warn, label),
       )
     default:
       warn(`${label}: random-color/unknown mode is approximated using the maximum gradient.`)
-      return gradient(data.maxGradient, warn, label, tint)
+      return gradient(data.maxGradient, warn, label)
   }
 }
 
@@ -443,7 +432,6 @@ async function convertPrefab(
   const materials: THREE.Material[] = []
   const textureUrls = new Map<string, string>()
   const materialCache = new Map<string, THREE.MeshBasicMaterial>()
-  const materialTints = new Map<string, QVector4>()
   const textureCache = new Map<string, THREE.Texture>()
   const shaderNames = new Map<string, string>()
   const meshCache = new Map<string, THREE.BufferGeometry>()
@@ -522,8 +510,8 @@ async function convertPrefab(
     ) as RecordValue
     const colors = Object.assign({}, ...array(properties.m_Colors).map(record)) as RecordValue
     const tint = rgba(colors._BaseColor ?? colors._TintColor ?? colors._Color)
-    // Quarks unlit batches ignore material color/opacity; bake tint into startColor instead.
-    materialTints.set(result.uuid, tint)
+    result.color.setRGB(tint.x, tint.y, tint.z, THREE.LinearSRGBColorSpace)
+    result.opacity = tint.w
     if (floats._ZWrite !== undefined) result.depthWrite = enabled(floats._ZWrite)
     if (floats._Cull !== undefined)
       result.side =
@@ -850,12 +838,7 @@ async function convertPrefab(
                 'YXZ',
               )
             : value(initial.startRotation, 0, 'Start Rotation', -1),
-        startColor: color(
-          initial.startColor,
-          localWarn,
-          'Start Color',
-          materialTints.get(mat.uuid),
-        ),
+        startColor: color(initial.startColor, localWarn, 'Start Color'),
         emissionOverTime: activeEmission
           ? value(emission.rateOverTime ?? emission.rate, 10, 'Emission rate')
           : new ConstantValue(0),

@@ -8,14 +8,7 @@ import {
   Scene,
   BufferGeometryLoader,
 } from 'three'
-import {
-  BatchedRenderer,
-  ParticleSystem,
-  QuarksLoader,
-  RenderMode,
-  ColorGeneratorFromJSON,
-  Vector4,
-} from 'three.quarks'
+import { BatchedRenderer, ParticleSystem, QuarksLoader, RenderMode } from 'three.quarks'
 import { readUnityPackage } from '../src/unity-package'
 import { prepareNativeDocument, validateNative } from '../src/native-properties'
 import { readTextureFile } from '../src/local-files'
@@ -62,72 +55,6 @@ function meshEntries(
 }
 
 describe('Unity package import', () => {
-  it.each([0, 0.25, 1])(
-    'keeps the active BaseColor alpha %s instead of using stale legacy tint',
-    async (alpha) => {
-      const entries = packageEntries()
-      entries[`${materialGuid}/asset`] = entries[`${materialGuid}/asset`]!.replace(
-        '    m_Colors:',
-        `    m_Colors:\n    - _BaseColor: {r: 1, g: 1, b: 1, a: ${alpha}}`,
-      )
-      const text = prefab.replace(
-        /    startColor:\n[\s\S]*?(?=  ShapeModule:)/,
-        '    startColor:\n      minMaxState: 0\n      maxColor: {r: 1, g: 1, b: 1, a: 1}\n',
-      )
-      const { json } = await load(text, entries)
-      const ps = (json.object as any).children[0].children[1].ps
-      expect(ps.startColor.color).toEqual({ r: 1, g: 1, b: 1, a: alpha })
-    },
-  )
-
-  it.each([0, 1, 2, 3])(
-    'bakes material tint/alpha into start-color mode %s for stock Quarks rendering',
-    async (mode) => {
-      const { text, entries } = meshEntries()
-      delete entries[`${textureGuid}/asset`]
-      const stop = '{r: 0.2, g: 0.4, b: 0.6, a: 0.5}'
-      const gradient = `{m_NumColorKeys: 1, m_NumAlphaKeys: 1, key0: ${stop}, ctime0: 0, atime0: 0}`
-      const source = text
-        .replace(
-          /    startColor:\n[\s\S]*?(?=  ShapeModule:)/,
-          `    startColor:\n      minMaxState: ${mode}\n      minColor: ${stop}\n      maxColor: ${stop}\n      minGradient: ${gradient}\n      maxGradient: ${gradient}\n`,
-        )
-        .replace('ColorModule:\n    enabled: 1', 'ColorModule:\n    enabled: 0')
-      const { json } = await load(source, entries)
-      const ps = (json.object as any).children[0].children[1].ps
-      const generator = ColorGeneratorFromJSON(ps.startColor)
-      const memory: number[] = []
-      generator.startGen(memory)
-      const sample = generator.genColor(memory, new Vector4(), 0.5)
-      expect(sample.x).toBeCloseTo(0.2)
-      expect(sample.y).toBeCloseTo(0.2)
-      expect(sample.z).toBeCloseTo(0.12)
-      expect(sample.w).toBeCloseTo(0.4)
-      const material = (json.materials as any[]).find((material) => material.uuid === ps.material)
-      expect(material.color).toBe(0xffffff)
-      expect(material.opacity ?? 1).toBe(1)
-      const group = new QuarksLoader().parse(json)
-      new Scene().add(group)
-      const renderer = new BatchedRenderer()
-      const systems: ParticleSystem[] = []
-      group.traverse((node) => {
-        if ('system' in node) systems.push(node.system as ParticleSystem)
-      })
-      try {
-        for (const system of systems) renderer.addSystem(system)
-        group.updateMatrixWorld(true)
-        for (let i = 0; i < 10; i++) renderer.update(1 / 60)
-        const batch = renderer.batches.find(
-          (batch) => batch.settings.renderMode === RenderMode.Mesh,
-        )!
-        expect(batch.geometry.getAttribute('color').getW(0)).toBeCloseTo(0.4)
-      } finally {
-        for (const system of systems) system.dispose()
-        renderer.dispose()
-      }
-    },
-  )
-
   it.each([
     ['fbx', meshFbx],
     ['obj', meshObj],
@@ -382,6 +309,7 @@ describe('Unity package import', () => {
     expect(material).toMatchObject({
       name: 'Fire material',
       blending: AdditiveBlending,
+      opacity: 0.8,
       depthWrite: false,
     })
     expect((json.textures as any[])[0]).toMatchObject({
