@@ -18,6 +18,7 @@ import {
   HemisphereEmitter,
   IntervalValue,
   LimitSpeedOverLife,
+  Noise,
   ParticleSystem,
   PiecewiseBezier,
   PointEmitter,
@@ -26,6 +27,7 @@ import {
   RenderMode,
   RotationOverLife,
   Rotation3DOverLife,
+  RotationBySpeed,
   SizeOverLife,
   SubParticleEmitMode,
   SphereEmitter,
@@ -716,6 +718,7 @@ async function convertPrefab(
       const value = (input: unknown, fallback: number, label: string, factor = 1, offset = 0) =>
         scalar(input, fallback, localWarn, label, factor, offset)
       const mode = number(renderer.m_RenderMode)
+      const simulationSpace = number(data.moveWithTransform)
       const geometry = mode === 4 ? await mesh(renderer.m_Mesh, localWarn) : undefined
       const renderMode = geometry
         ? RenderMode.Mesh
@@ -740,6 +743,7 @@ async function convertPrefab(
         localWarn('Only the first renderer material is used.')
       const mat = await material(refs[0])
       const behaviors = []
+      const convertedModules = new Set<string>()
       if (enabled(record(data.ColorModule).enabled))
         behaviors.push(
           new ColorOverLife(lifetimeColor(record(data.ColorModule).gradient, localWarn)),
@@ -807,6 +811,68 @@ async function convertPrefab(
           )
         }
       }
+      const force = record(data.ForceModule)
+      if (enabled(force.enabled)) {
+        if (
+          ![0, 1].includes(simulationSpace) ||
+          enabled(force.inWorldSpace) !== (simulationSpace === 1)
+        )
+          localWarn(
+            'Force: world/local force space differs from simulation space and is not converted.',
+          )
+        else {
+          behaviors.push(
+            new ForceOverLife(
+              scalar(force.x, 0, localWarn, 'Force X'),
+              scalar(force.y, 0, localWarn, 'Force Y'),
+              scalar(force.z, 0, localWarn, 'Force Z', -1),
+            ),
+          )
+          convertedModules.add('ForceModule')
+          if (enabled(force.randomizePerFrame))
+            localWarn('Force: per-frame randomization is approximated by per-particle values.')
+        }
+      }
+      const noise = record(data.NoiseModule)
+      if (enabled(noise.enabled)) {
+        behaviors.push(
+          new Noise(
+            scalar(noise.frequency, 1, localWarn, 'Noise frequency'),
+            scalar(noise.strength, 1, localWarn, 'Noise strength'),
+            scalar(noise.positionAmount, 1, localWarn, 'Noise position amount'),
+            scalar(noise.rotationAmount, 0, localWarn, 'Noise rotation amount'),
+          ),
+        )
+        convertedModules.add('NoiseModule')
+        localWarn('Noise: Quarks simplex noise differs from Unity noise sampling.')
+        if (enabled(noise.separateAxes))
+          localWarn('Noise: separate-axis strength is approximated using the X strength.')
+        if (number(noise.octaves, 1) !== 1) localWarn('Noise: multiple octaves are not converted.')
+        if (!enabled(noise.damping ?? 1)) localWarn('Noise: disabled damping is not converted.')
+        if (number(record(noise.scrollSpeed).scalar, number(noise.scrollSpeed)))
+          localWarn('Noise: scroll speed is not converted.')
+        if (enabled(noise.remapEnabled)) localWarn('Noise: remapping is not converted.')
+        if (number(record(noise.sizeAmount).scalar, number(noise.sizeAmount)))
+          localWarn('Noise: size amount is not converted.')
+      }
+      const rotationBySpeed = record(data.RotationBySpeedModule)
+      if (enabled(rotationBySpeed.enabled)) {
+        const range = record(rotationBySpeed.range)
+        const min = number(range.x),
+          max = number(range.y)
+        if (!geometry && min !== max) {
+          behaviors.push(
+            new RotationBySpeed(
+              value(rotationBySpeed.curve, 0, 'Rotation by Speed', -1),
+              new IntervalValue(Math.min(min, max), Math.max(min, max)),
+            ),
+          )
+          convertedModules.add('RotationBySpeedModule')
+          localWarn('Rotation by Speed: Quarks uses start speed rather than instantaneous speed.')
+          if (enabled(rotationBySpeed.separateAxes))
+            localWarn('Rotation by Speed: separate-axis rotation is approximated by its Z curve.')
+        }
+      }
       const limit = record(data.ClampVelocityModule)
       if (enabled(limit.enabled)) {
         if (enabled(limit.separateAxis ?? limit.separateAxes))
@@ -865,11 +931,11 @@ async function convertPrefab(
             'UVModule',
             'SubModule',
           ].includes(key) &&
+          !convertedModules.has(key) &&
           enabled(record(module).enabled)
         )
           localWarn(`${key} is enabled but not converted.`)
       if (number(data.simulationSpeed, 1) !== 1) localWarn('Simulation speed is not converted.')
-      const simulationSpace = number(data.moveWithTransform)
       if (![0, 1, 2].includes(simulationSpace))
         localWarn(`Unknown simulation space ${simulationSpace}; using local space.`)
       if (simulationSpace === 2 || fileId(data.moveWithCustomTransform) !== '0')

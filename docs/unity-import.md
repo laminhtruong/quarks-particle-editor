@@ -51,6 +51,7 @@ etc.), not arbitrary binary Unity assets or VFX Graph.
 | Color over lifetime                                    | Constant/gradient and random color/gradient ranges                                                                                |
 | Size over lifetime                                     | Scalar or separate XYZ; scalar random constants are approximated using the maximum                                                |
 | Rotation over lifetime                                 | Z angular velocity; mesh particles also support XYZ rotation through native Euler generators                                      |
+| Force, noise, rotation by speed                        | Quarks behaviors; force requires matching spaces; noise and speed semantics are approximate                                       |
 | Limit velocity over lifetime                           | Magnitude limit and dampen; Quarks damping is approximate, separate-axis limits and drag warn                                     |
 | Sphere, hemisphere, cone, circle, donut, rectangle     | Native shapes where available; distribution may differ; cone volume and boxes are approximated                                    |
 | Shape offsets/rotation/scale, direction modifiers      | Warned, not applied independently from emitter transforms                                                                         |
@@ -61,7 +62,7 @@ etc.), not arbitrary binary Unity assets or VFX Graph.
 | Material                                               | First material; base/tint color, alpha, alpha clip, depth write, culling, common alpha/additive blending                          |
 | Main texture                                           | `_BaseMap` / `_MainTex`, UV repeat/offset, wrap, point filtering, sRGB flag; PNG/JPEG/WebP/GIF externalized on folder export      |
 | Unity shader                                           | Replaced by Quarks unlit material, always reported; custom shader effects/additional maps are not reproduced                      |
-| Other enabled modules                                  | Named in warnings, not converted (including trails, noise, forces and physics)                                                   |
+| Other enabled modules                                  | Named in warnings, not converted (including velocity/inherited velocity, collision and Unity trail modules)                       |
 | Scripts, Animator/Animation, VFX Graph                 | Not converted; named in warnings when encountered                                                                                 |
 
 Unity's particle caps, scaling/culling semantics, random seeds, project physics

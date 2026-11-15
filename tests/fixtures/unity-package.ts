@@ -143,7 +143,7 @@ ParticleSystem:
         m_Curve:
         - {time: 0, value: 0, outSlope: 1}
         - {time: 1, value: 1, inSlope: 1}
-  NoiseModule: {enabled: 1}
+  NoiseModule: {enabled: 0}
 --- !u!199 &9007199254740995
 ParticleSystemRenderer:
   m_GameObject: {fileID: 9007199254740992}

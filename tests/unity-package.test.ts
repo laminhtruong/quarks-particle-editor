@@ -390,7 +390,7 @@ describe('Unity package import', () => {
 
   it('converts magnitude velocity limits and reports unsupported axis limits and drag', async () => {
     const text = prefab.replace(
-      'NoiseModule: {enabled: 1}',
+      'NoiseModule: {enabled: 0}',
       'ClampVelocityModule:\n    enabled: 1\n    magnitude: {scalar: 2}\n    dampen: 0.6\n    drag: {scalar: 0.2}',
     )
     const { json, warnings } = await load(text)
@@ -402,6 +402,69 @@ describe('Unity package import', () => {
     expect(warnings.join('\n')).not.toContain('ClampVelocityModule is enabled but not converted')
     const separate = await load(text.replace('dampen: 0.6', 'separateAxis: 1\n    dampen: 0.6'))
     expect(separate.warnings.join('\n')).toContain('separate-axis limits are not converted')
+  })
+
+  it('converts force, noise and rotation-by-speed modules Quarks can represent', async () => {
+    const forceText = prefab.replace(
+      'NoiseModule: {enabled: 0}',
+      'ForceModule:\n    enabled: 1\n    x: {scalar: 1}\n    y: {scalar: 2}\n    z: {scalar: 3}\n    inWorldSpace: 1',
+    )
+    const force = await load(forceText)
+    const forcePS = (force.json.object as any).children[0].children[1].ps
+    expect(forcePS.behaviors.find((b: any) => b.type === 'ForceOverLife')).toMatchObject({
+      x: { value: 1 },
+      y: { value: 2 },
+      z: { value: -3 },
+    })
+    expect(force.warnings.join('\n')).not.toContain('ForceModule is enabled but not converted')
+    const mismatchedForce = await load(forceText.replace('inWorldSpace: 1', 'inWorldSpace: 0'))
+    expect(mismatchedForce.warnings.join('\n')).toContain(
+      'Force: world/local force space differs from simulation space',
+    )
+    expect(mismatchedForce.warnings.join('\n')).toContain(
+      'ForceModule is enabled but not converted',
+    )
+
+    const noise = await load(
+      prefab.replace(
+        'NoiseModule: {enabled: 0}',
+        'NoiseModule:\n    enabled: 1\n    strength: {scalar: 2}\n    frequency: 0.5\n    positionAmount: {scalar: 0.75}\n    rotationAmount: {scalar: 0.25}',
+      ),
+    )
+    const noisePS = (noise.json.object as any).children[0].children[1].ps
+    expect(noisePS.behaviors.find((b: any) => b.type === 'Noise')).toMatchObject({
+      power: { value: 2 },
+      frequency: { value: 0.5 },
+      positionAmount: { value: 0.75 },
+      rotationAmount: { value: 0.25 },
+    })
+    expect(noise.warnings.join('\n')).not.toContain('NoiseModule is enabled but not converted')
+
+    const rotation = await load(
+      prefab.replace(
+        'NoiseModule: {enabled: 0}',
+        'RotationBySpeedModule:\n    enabled: 1\n    curve: {scalar: 0.25}\n    range: {x: 2, y: 8}',
+      ),
+    )
+    const rotationPS = (rotation.json.object as any).children[0].children[1].ps
+    expect(rotationPS.behaviors.find((b: any) => b.type === 'RotationBySpeed')).toMatchObject({
+      angularVelocity: { value: -0.25 },
+      speedRange: { a: 2, b: 8 },
+    })
+    expect(rotation.warnings.join('\n')).not.toContain(
+      'RotationBySpeedModule is enabled but not converted',
+    )
+  })
+
+  it('keeps warnings for modules without an equivalent Quarks behavior', async () => {
+    const { warnings } = await load(
+      prefab.replace(
+        'NoiseModule: {enabled: 0}',
+        'InheritVelocityModule: {enabled: 1}\n  CollisionModule: {enabled: 1}',
+      ),
+    )
+    expect(warnings.join('\n')).toContain('InheritVelocityModule is enabled but not converted')
+    expect(warnings.join('\n')).toContain('CollisionModule is enabled but not converted')
   })
 
   it.each([
@@ -712,7 +775,9 @@ describe('Unity package import', () => {
   })
 
   it('preserves 64-bit IDs, hierarchy, inactive objects, common modules and embedded GUID-resolved assets', async () => {
-    const { json, warnings, particleCount } = await load()
+    const { json, warnings, particleCount } = await load(
+      prefab.replace('NoiseModule: {enabled: 0}', 'NoiseModule: {enabled: 1}'),
+    )
     expect(particleCount).toBe(2)
     const root = json.object as any
     const gameObject = root.children[0]
@@ -742,6 +807,7 @@ describe('Unity package import', () => {
       'ColorOverLife',
       'SizeOverLife',
       'RotationOverLife',
+      'Noise',
       'FrameOverLife',
     ])
     const size = ps.behaviors[1].size.functions[0].function
@@ -765,7 +831,8 @@ describe('Unity package import', () => {
     expect(json.images).toHaveLength(1)
     expect(json.images![0]!.url).toBe(imageUrl)
     expect(readTextureFile).toHaveBeenCalled()
-    expect(warnings.join('\n')).toContain('NoiseModule')
+    expect(ps.behaviors.map((b: any) => b.type)).toContain('Noise')
+    expect(warnings.join('\n')).not.toContain('NoiseModule is enabled but not converted')
     expect(warnings.join('\n')).toContain('Particles/Additive')
     expect(root.userData.unityImport.warnings).toEqual(warnings)
     expect(JSON.stringify(json)).not.toContain('9007199254740993n')
@@ -778,7 +845,11 @@ describe('Unity package import', () => {
   it('loads and simulates the converted document with stock Quarks', async () => {
     const entries = packageEntries()
     delete entries[`${materialGuid}/asset`]
-    const { json } = await load(prefab, entries)
+    const text = prefab.replace(
+      'NoiseModule: {enabled: 0}',
+      'ForceModule:\n    enabled: 1\n    x: {scalar: 1}\n    inWorldSpace: 1\n  NoiseModule: {enabled: 1}\n  RotationBySpeedModule:\n    enabled: 1\n    curve: {scalar: 0.1}\n    range: {x: 0, y: 8}',
+    )
+    const { json } = await load(text, entries)
     prepareNativeDocument(json)
     validateNative(json)
     const root = new QuarksLoader().parse(json)
@@ -864,8 +935,8 @@ describe('Unity package import', () => {
         'minMaxState: 3\n      minScalar: 1\n      scalar: 2',
       )
       .replace(
-        'NoiseModule: {enabled: 1}',
-        'NoiseModule: {enabled: 1}\n  startDelay: {minMaxState: 0, scalar: 2}',
+        'NoiseModule: {enabled: 0}',
+        'NoiseModule: {enabled: 0}\n  startDelay: {minMaxState: 0, scalar: 2}',
       )
     const result = await load(text)
     expect(result.warnings.join('\n')).toContain('random constants')
@@ -1012,8 +1083,8 @@ describe('Unity package import', () => {
     'links Unity sub-emitter event $unityType to its target system',
     async ({ unityType, mode }) => {
       const text = prefab.replace(
-        '  NoiseModule: {enabled: 1}',
-        `  SubModule:\n    enabled: 1\n    subEmitters:\n    - emitter: {fileID: 9007199254740998}\n      type: ${unityType}\n      properties: 0\n      emitProbability: 0.75\n  NoiseModule: {enabled: 1}`,
+        '  NoiseModule: {enabled: 0}',
+        `  SubModule:\n    enabled: 1\n    subEmitters:\n    - emitter: {fileID: 9007199254740998}\n      type: ${unityType}\n      properties: 0\n      emitProbability: 0.75\n  NoiseModule: {enabled: 0}`,
       )
       const { json, warnings } = await load(text)
       const nodes: any[] = []
@@ -1056,8 +1127,8 @@ describe('Unity package import', () => {
 
   it('warns and skips unsupported Unity sub-emitter events', async () => {
     const text = prefab.replace(
-      '  NoiseModule: {enabled: 1}',
-      '  SubModule:\n    enabled: 1\n    subEmitters:\n    - emitter: {fileID: 9007199254740998}\n      type: 1\n      properties: 0\n  NoiseModule: {enabled: 1}',
+      '  NoiseModule: {enabled: 0}',
+      '  SubModule:\n    enabled: 1\n    subEmitters:\n    - emitter: {fileID: 9007199254740998}\n      type: 1\n      properties: 0\n  NoiseModule: {enabled: 0}',
     )
     const { json, warnings } = await load(text)
     const emitter = (json.object as any).children[0].children[1]
