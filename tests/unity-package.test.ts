@@ -34,6 +34,25 @@ const load = async (text = prefab, entries = packageEntries(text)) => {
   return unity.convertPrefab(unity.prefabs[0]!)
 }
 
+// Feed decompressed chunks directly so size-limit tests do not allocate gigabyte fixtures.
+function streamedPackage(chunks: Iterable<Uint8Array<ArrayBuffer>>): File {
+  const iterator = chunks[Symbol.iterator]()
+  return {
+    name: 'streamed.unitypackage',
+    size: 1,
+    stream: () => ({
+      pipeThrough: () =>
+        new ReadableStream({
+          pull(controller) {
+            const { done, value } = iterator.next()
+            if (done) controller.close()
+            else controller.enqueue(value)
+          },
+        }),
+    }),
+  } as unknown as File
+}
+
 function meshEntries(
   source = meshFbx,
   extension = 'fbx',
@@ -55,6 +74,89 @@ function meshEntries(
 }
 
 describe('Unity package import', () => {
+  it('awaits progress callbacks and reports the complete expanded byte count', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const progress = vi.fn(() => gate)
+    let completed = false
+    const reading = readUnityPackage(packageFile(packageEntries()), progress).then((unity) => {
+      completed = true
+      return unity
+    })
+    await vi.waitFor(() => expect(progress).toHaveBeenCalled())
+    expect(completed).toBe(false)
+    release()
+    expect((await reading).prefabs).toEqual(['Assets/Effects/Fire.prefab'])
+    expect(progress.mock.calls.at(-1)).toEqual([tar(packageEntries()).length])
+  })
+
+  it('reads packages larger than 512 MB without retaining ignored entries', async () => {
+    const ignored = tar({ 'preview.png': new Uint8Array(1024 * 1024) }).subarray(0, -1024)
+    function* chunks() {
+      for (let i = 0; i < 513; i++) yield ignored
+      yield tar(packageEntries())
+    }
+    const unity = await readUnityPackage(streamedPackage(chunks()))
+    expect(unity.prefabs).toEqual(['Assets/Effects/Fire.prefab'])
+    expect((await unity.convertPrefab(unity.prefabs[0]!)).particleCount).toBe(2)
+  })
+
+  it.each(['entries', 'padding'])('enforces the 1024 MB expanded limit for %s', async (kind) => {
+    const bytes = new Uint8Array(1024 * 1024)
+    const chunk = kind === 'entries' ? tar({ ignored: bytes }).subarray(0, -1024) : bytes
+    function* chunks() {
+      if (kind === 'padding') yield tar(packageEntries())
+      for (let i = 0; i < 1024; i++) yield chunk
+    }
+    await expect(readUnityPackage(streamedPackage(chunks()))).rejects.toThrow('1024 MB')
+  })
+
+  it('validates the gzip checksum after the tar end marker', async () => {
+    const bytes = new Uint8Array(gzipSync(tar(packageEntries())))
+    bytes[bytes.length - 8]! ^= 1
+    await expect(readUnityPackage(new File([bytes], 'corrupt.unitypackage'))).rejects.toThrow(
+      'decompress',
+    )
+  })
+
+  it.each([1, 511, 513, 4093])(
+    'reads tar headers and assets split into %i-byte chunks',
+    async (size) => {
+      const bytes = tar(packageEntries())
+      function* chunks() {
+        for (let offset = 0; offset < bytes.length; offset += size)
+          yield bytes.subarray(offset, offset + size)
+      }
+      const unity = await readUnityPackage(streamedPackage(chunks()))
+      expect((await unity.convertPrefab(unity.prefabs[0]!)).particleCount).toBe(2)
+    },
+  )
+
+  it.each(['\n00', '\r\n00', '\n', '\0'])(
+    'accepts legacy and plain pathname endings %j',
+    async (ending) => {
+      const entries = packageEntries()
+      for (const name of Object.keys(entries))
+        if (name.endsWith('/pathname')) entries[name] += ending
+      entries['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pathname'] = `Assets/Other.prefab${ending}`
+      entries['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/asset'] = prefab
+      const unity = await readUnityPackage(packageFile(entries))
+      expect(unity.prefabs).toEqual(['Assets/Effects/Fire.prefab', 'Assets/Other.prefab'])
+      expect((await unity.convertPrefab('Assets/Other.prefab')).particleCount).toBe(2)
+    },
+  )
+
+  it.each(['../Fire.prefab\n00', 'Assets/Fire\nOther.prefab', 'Assets/Fire.prefab\n01'])(
+    'still rejects unsafe or unrecognized multiline pathname %j',
+    async (path) => {
+      const entries = packageEntries()
+      entries[`${prefabGuid}/pathname`] = path
+      await expect(readUnityPackage(packageFile(entries))).rejects.toThrow('Unsafe')
+    },
+  )
+
   it.each([
     ['fbx', meshFbx],
     ['obj', meshObj],

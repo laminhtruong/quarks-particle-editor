@@ -73,22 +73,18 @@ const fileId = (value: unknown): string => String(record(value).fileID ?? '0')
 const guid = (value: unknown): string => String(record(value).guid ?? '').toLowerCase()
 
 /** Unity packages are gzip/tar archives. Nothing is extracted to disk or fetched. */
-export async function readUnityPackage(file: File): Promise<UnityPackage> {
+export async function readUnityPackage(
+  file: File,
+  onProgress?: (expandedBytes: number) => void | Promise<void>,
+): Promise<UnityPackage> {
   if (!/\.unitypackage$/i.test(file.name) || !file.size || file.size > 128 * MB)
     throw new Error('Choose a .unitypackage file between 1 byte and 128 MB.')
   if (typeof DecompressionStream === 'undefined')
     throw new Error('Unity package import needs a browser with gzip DecompressionStream support.')
   const reader = file.stream().pipeThrough(new DecompressionStream('gzip')).getReader()
-  const chunks: Uint8Array[] = []
-  let size = 0
+  let assets: Map<string, Asset>
   try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      size += value.length
-      if (size > 512 * MB) throw new Error('Expanded Unity package must not exceed 512 MB.')
-      chunks.push(value)
-    }
+    assets = await readAssets(reader, onProgress)
   } catch (error) {
     await reader.cancel().catch(() => {})
     throw new Error(
@@ -97,13 +93,6 @@ export async function readUnityPackage(file: File): Promise<UnityPackage> {
   } finally {
     reader.releaseLock()
   }
-  const bytes = new Uint8Array(size)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.length
-  }
-  const assets = readAssets(bytes)
   const prefabs = [...assets.values()]
     .filter((asset) => /\.prefab$/i.test(asset.path))
     .map((asset) => asset.path)
@@ -122,22 +111,49 @@ export async function readUnityPackage(file: File): Promise<UnityPackage> {
   }
 }
 
-function readAssets(bytes: Uint8Array<ArrayBuffer>): Map<string, Asset> {
+async function readAssets(
+  reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
+  onProgress?: (expandedBytes: number) => void | Promise<void>,
+): Promise<Map<string, Asset>> {
   const entries = new Map<string, Uint8Array<ArrayBuffer>>()
+  let chunk: Uint8Array<ArrayBuffer> = new Uint8Array(0)
   let offset = 0
+  let size = 0
   let count = 0
-  let ended = false
-  const text = (start: number, length: number) =>
-    decoder.decode(bytes.subarray(start, start + length)).replace(/\0.*$/s, '')
-  while (offset + 512 <= bytes.length) {
-    const header = bytes.subarray(offset, offset + 512)
-    if (header.every((byte) => byte === 0)) {
-      ended = true
-      break
+  let lastProgress = 0
+  const next = async () => {
+    const { done, value } = await reader.read()
+    chunk = value ?? new Uint8Array(0)
+    offset = 0
+    size += chunk.length
+    if (size > 1024 * MB) throw new Error('Expanded Unity package must not exceed 1024 MB.')
+    if (onProgress && (done || performance.now() - lastProgress >= 32)) {
+      await onProgress(size)
+      lastProgress = performance.now()
     }
+    return !done
+  }
+  const read = async (length: number, keep = true): Promise<Uint8Array<ArrayBuffer>> => {
+    const bytes = new Uint8Array(keep ? length : 0)
+    let written = 0
+    while (written < length) {
+      if (offset === chunk.length && !(await next()))
+        throw new Error('Unity package contains a truncated tar archive.')
+      const take = Math.min(length - written, chunk.length - offset)
+      if (keep) bytes.set(chunk.subarray(offset, offset + take), written)
+      offset += take
+      written += take
+    }
+    return bytes
+  }
+  while (true) {
+    const header = await read(512)
+    if (header.every((byte) => byte === 0)) break
+    const text = (start: number, length: number) =>
+      decoder.decode(header.subarray(start, start + length)).replace(/\0.*$/s, '')
     if (++count > 40000) throw new Error('Unity package has too many archive entries.')
-    const octal = text(offset + 124, 12).trim()
-    const checksum = text(offset + 148, 8).trim()
+    const octal = text(124, 12).trim()
+    const checksum = text(148, 8).trim()
     if (!/^[0-7]+$/.test(octal) || !/^[0-7]+$/.test(checksum))
       throw new Error('Invalid Unity package tar header.')
     const sum = header.reduce(
@@ -146,23 +162,26 @@ function readAssets(bytes: Uint8Array<ArrayBuffer>): Map<string, Asset> {
     )
     if (sum !== parseInt(checksum, 8)) throw new Error('Unity package tar checksum mismatch.')
     const length = parseInt(octal, 8)
-    if (length > 64 * MB || offset + 512 + length > bytes.length)
+    if (length > 64 * MB)
       throw new Error('Unity package contains an oversized (64 MB) or truncated asset.')
-    const prefix = text(offset + 345, 155)
-    const name = `${prefix ? `${prefix}/` : ''}${text(offset, 100)}`.replace(/^\.\//, '')
+    const prefix = text(345, 155)
+    const name = `${prefix ? `${prefix}/` : ''}${text(0, 100)}`.replace(/^\.\//, '')
     const type = header[156]
     if (type !== 0 && type !== 48 && type !== 53)
       throw new Error(
         'Unsupported Unity package tar entry (links and extended headers are not accepted).',
       )
-    if (type !== 53 && /^[a-f\d]{32}\/(asset|asset\.meta|pathname)$/i.test(name)) {
+    const keep = type !== 53 && /^[a-f\d]{32}\/(asset|asset\.meta|pathname)$/i.test(name)
+    const data = await read(length, keep)
+    if (keep) {
       const key = name.toLowerCase()
       if (entries.has(key)) throw new Error('Unity package contains duplicate asset entries.')
-      entries.set(key, bytes.subarray(offset + 512, offset + 512 + length))
+      entries.set(key, data)
     }
-    offset += 512 + Math.ceil(length / 512) * 512
+    await read((512 - (length % 512)) % 512, false)
   }
-  if (!ended) throw new Error('Truncated Unity package tar archive.')
+  // Drain the gzip stream to verify its trailer and enforce the total limit, including tar padding.
+  while (await next()) {}
   const assets = new Map<string, Asset>()
   const paths = new Set<string>()
   for (const [name, data] of entries) {
@@ -171,7 +190,12 @@ function readAssets(bytes: Uint8Array<ArrayBuffer>): Map<string, Asset> {
     const pathname = entries.get(`${id}/pathname`)
     if (!pathname || pathname.length > 4096)
       throw new Error('Unity asset is missing a valid pathname.')
-    const path = decoder.decode(pathname).replace(/\0+$/, '').trim()
+    // Legacy Asset Store packages append a separate "00" record after the pathname.
+    const path = decoder
+      .decode(pathname)
+      .replace(/\0+$/, '')
+      .replace(/\r?\n00$/, '')
+      .trim()
     if (
       !path ||
       /[\\\u0000-\u001f]/.test(path) ||

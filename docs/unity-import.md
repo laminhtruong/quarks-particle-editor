@@ -87,7 +87,11 @@ or mirrored/non-uniformly scaled hierarchies. This is not a Unity model importer
 
 ## Limits and validation
 
-- Compressed package: **128 MB**; expanded tar: **512 MB**.
+- Compressed package: **128 MB**; expanded tar: **1024 MB**. Tar entries are read
+  sequentially without buffering a second copy of the entire expanded archive;
+  asset contents are still retained in memory for prefab conversion.
+- Legacy Asset Store pathname records ending in a separate `00` line are accepted;
+  other embedded control characters and unsafe paths remain rejected.
 - Archive: **40,000 entries**; each entry: **64 MB**. Links, extended tar headers,
   duplicate asset entries/paths and unsafe asset paths are rejected.
 - Prefab/material text: **16 MB**, **20,000 serialized objects**; prefab:
