@@ -3,7 +3,11 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   build: {
     lib: {
-      entry: { 'quarks-particle-editor': 'src/index.ts', document: 'src/document.ts' },
+      entry: {
+        'quarks-particle-editor': 'src/index.ts',
+        document: 'src/document.ts',
+        'project-loader': 'src/project-loader.ts',
+      },
       formats: ['es'],
       fileName: (_format, name) => `${name}.js`,
     },

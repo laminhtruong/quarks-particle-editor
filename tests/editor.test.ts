@@ -10,6 +10,8 @@ import * as localFiles from '../src/local-files'
 import * as unityPackages from '../src/unity-package'
 import * as projectZip from '../src/project-zip'
 import { memoryFolder } from './fixtures/folder'
+import { meshEffect } from './fixtures/mesh'
+import { prepareFolderExport } from '../src/folder-export'
 
 const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn(), setSize: vi.fn() }))
 vi.mock('three', async (original) => ({
@@ -395,6 +397,135 @@ function dropFiles(root: ElementStub, files: { name: string; [key: string]: unkn
 }
 
 describe('project-independent particle editor', () => {
+  it('saves meshes separately, reopens them, and preserves subsequent edits and shared assets', async () => {
+    const source = meshEffect('mesh-project')
+    const folder = memoryFolder()
+    const picker = vi.fn(async () => folder.directory)
+    Object.assign(browser, { showDirectoryPicker: picker })
+    const { editor, root, click } = mount({ listEffects: async () => [source] })
+    await editor.ready
+    click('save')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Saved project'),
+    )
+    const initial = JSON.parse(await folder.files.get('mesh-project.json')!.text())
+    const path = initial.geometries[0].url
+    expect(path).toMatch(/^assets\/meshes\/[a-f0-9]{16}\.json$/)
+    expect(initial.geometries[0].data).toBeUndefined()
+    expect(folder.files.has(path)).toBe(true)
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    click('duplicate-system')
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    const saved = JSON.parse(await folder.files.get('mesh-project.json')!.text())
+    expect(saved.object.children).toHaveLength(2)
+    expect(saved.geometries[0].url).toBe(path)
+    expect(folder.files.size).toBe(2)
+    expect(folder.write.mock.calls.filter(([written]) => written === path)).toHaveLength(1)
+    expect(picker).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    { extension: 'zip', openFolder: true },
+    { extension: 'unitypackage', openFolder: true },
+    { extension: 'zip', openFolder: false },
+    { extension: 'unitypackage', openFolder: false },
+  ])(
+    'copies mesh assets during $extension import (folder=$openFolder) without treating mesh JSON as a texture',
+    async ({ extension, openFolder }) => {
+      const source = meshEffect('imported-mesh')
+      const bundle = await prepareFolderExport(source.json, 'https://game.test/')
+      const path = [...bundle.files.keys()][0]!
+      vi.spyOn(projectZip, 'readProjectZip').mockResolvedValue({
+        effects: [{ path: 'effect.json', json: source.json }],
+        files: new Map(),
+        textures: new Map(),
+      })
+      vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
+        prefabs: ['Assets/Mesh.prefab'],
+        convertPrefab: async () => ({ json: source.json, warnings: [], particleCount: 1 }),
+      })
+      const textures = vi.spyOn(localFiles, 'readTextureFile')
+      const folder = memoryFolder()
+      Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+      const { editor, root, click } = mount()
+      await editor.ready
+      if (openFolder) {
+        click('open-project')
+        await vi.waitFor(() =>
+          expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+        )
+      }
+      root.querySelector('[data-effects-input]').listeners.get('change')?.({
+        target: { files: [{ name: `project.${extension}` }] },
+      })
+      await vi.waitFor(() =>
+        expect(root.querySelector('[data-effect-count]').textContent).toBe('01'),
+      )
+      expect(textures).not.toHaveBeenCalled()
+      expect(folder.files.has(path)).toBe(openFolder)
+      expect(folder.files.has('imported-mesh.json')).toBe(false)
+      click('save')
+      await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+      expect(
+        JSON.parse(await folder.files.get('imported-mesh.json')!.text()).geometries[0].url,
+      ).toBe(path)
+      expect(folder.files.has(path)).toBe(true)
+    },
+  )
+
+  it('keeps native inline mesh geometry in the host save callback', async () => {
+    const source = meshEffect('host-mesh')
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, click } = mount({ listEffects: async () => [source], saveEffect })
+    await editor.ready
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledOnce())
+    const geometry = (saveEffect.mock.calls[0]![1].geometries as Record<string, unknown>[])[0]!
+    expect(geometry.data).toBeDefined()
+    expect(geometry.url).toBeUndefined()
+    expect(() => new QuarksLoader().parse(saveEffect.mock.calls[0]![1])).not.toThrow()
+  })
+
+  it('imports standalone mesh assets without UUIDs and assigns fresh IDs to repeated geometry imports', async () => {
+    const source = meshEffect('standalone')
+    const bundle = await prepareFolderExport(source.json, 'https://game.test/')
+    const asset = [...bundle.files.values()][0]!
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    const input = root.querySelector('[data-geometry-input]')
+    const choose = (value: unknown) =>
+      input.listeners.get('change')?.({
+        target: {
+          files: [{ name: 'geometry.json', size: 1000, text: async () => JSON.stringify(value) }],
+        },
+      })
+    choose(JSON.parse(await asset.text()))
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(true))
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const first = saveEffect.mock.calls[0]![1]
+    const id = (first.object.children![0] as { ps: { instancingGeometry: string } }).ps
+      .instancingGeometry
+    expect(typeof id).toBe('string')
+    const imported = (first.geometries as Record<string, unknown>[]).find(
+      (geometry) => geometry.uuid === id,
+    )!
+    expect(imported.data).toBeDefined()
+    choose({ ...JSON.parse(await asset.text()), uuid: id })
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(true))
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(2))
+    const second = saveEffect.mock.calls[1]![1]
+    expect(
+      (second.object.children![0] as { ps: { instancingGeometry: string } }).ps.instancingGeometry,
+    ).not.toBe(id)
+  })
+
   it('shows only Open project and Save project in the top toolbar', async () => {
     const { editor, root } = mount()
     await editor.ready

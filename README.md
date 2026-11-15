@@ -34,7 +34,7 @@ Open the URL printed by Vite:
    preview scrubber to check the result.
 5. **Save project** (Ctrl/Cmd+S) saves all effects into the selected folder without
    asking again. With no folder selected, the first save asks for one. Effect JSON
-   goes at its root; image files go in `assets/textures/`. Undo/Redo use
+   goes at its root; images go in `assets/textures/`, mesh data in `assets/meshes/`. Undo/Redo use
    Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y), without toolbar buttons.
 
 Unsaved edits stay in the current browser session; reload loses them. Save the
@@ -89,7 +89,8 @@ for duplicate names. The source ZIP is never modified.
 Referenced images and unused raster textures join the texture library, sharing
 short content-hashed files. If a project folder is already selected, imported
 images are copied there immediately; otherwise they are written on **Save project**.
-Effect JSON is written only on save. Missing or corrupt images and invalid JSON
+External mesh references are also resolved from the ZIP before editing; missing
+or malformed mesh files abort the import. Effect JSON is written only on save. Missing or corrupt images and invalid JSON
 abort ZIP decoding without replacing the current session. Native runtime-incompatible
 effects are skipped with a reason in **Import report**.
 
@@ -226,17 +227,17 @@ after clicking **New effect**.
 Texture URLs may be relative, root-relative, HTTP(S), or image data URLs. Relative
 URLs resolve against the host page during editing. Folder export copies images
 from these URLs into the output; cross-origin images need CORS headers. The
-`saveEffect` callback retains the original native URL/embedded-image contract.
+`saveEffect` callback retains the original native URL/embedded-image and inline-geometry contract.
 Files without a texture use an untextured material, not a bundled image. The
 preview has its own Three.js scene; exported JSON can be loaded into a game's
-scene with `QuarksLoader` and `BatchedRenderer`.
+scene with `loadProjectEffect()` and `BatchedRenderer`.
 
 ### Project layout and game loading
 
 Project folders require Chrome/Edge with the File System Access API on HTTPS or
 localhost. Cancelling the picker or a failed write does not mark edits as saved.
 Opened project JSON files are updated in place; overwriting a file not already
-owned by the session requires confirmation. All images are written before JSON.
+owned by the session requires confirmation. All texture/mesh assets are written before effect JSON.
 Each file write is atomic, but saving several JSON files is not one transaction:
 a failure can leave some documents updated, with the project still marked unsaved.
 
@@ -247,6 +248,8 @@ effects/
   assets/textures/
     2cf24dba5fb0a30e.png
     42b7c9ea8a14d250.webp
+  assets/meshes/
+    6c1bf5f8b3f00525.json
 ```
 
 Image URLs in JSON are relative to that JSON, e.g.
@@ -257,33 +260,47 @@ re-encoded. Identical bytes share a content-hashed file across emitters and
 effects exported into the same folder; existing matching files are not rewritten.
 Old unused assets are not deleted; older 64-character filenames can still be opened.
 Deleting an effect in the editor removes its JSON on the next successful save.
-Numeric Three.js DataTextures and geometry
-remain native inline data to preserve precision and stock-loader compatibility.
+Numeric Three.js DataTextures remain inline to preserve precision. BufferGeometry
+vertex/index data is stored once in `assets/meshes/<hash>.json`; effect JSON keeps
+only the native UUID/type/name and a relative `url` in its `geometries` entries.
+Mesh assets preserve indices, typed attributes, normals, UVs, groups, morphs and
+skinning data without quantization or conversion to another mesh format. Hashing
+ignores geometry UUID/name and JSON key order, so matching payloads share files
+across effects. Small parametric primitives remain inline as construction parameters,
+not vertex arrays. Older inline-mesh projects still open and migrate on the next save.
+Mesh JSON is limited to 64 MB per file. Missing, malformed or conflicting mesh assets
+fail the operation instead of falling back to a different shape.
 Missing images, HTTP/CORS failures, and unsupported image MIME types stop export
 rather than silently producing an incomplete package.
 
 Serve the **whole folder** as static game assets, retaining its structure:
 
 ```ts
-import { BatchedRenderer, QuarksLoader, QuarksUtil } from 'three.quarks'
+import { BatchedRenderer, QuarksUtil } from 'three.quarks'
+import { loadProjectEffect } from 'quarks-particle-editor/loader'
 
 const batch = new BatchedRenderer()
 scene.add(batch)
-new QuarksLoader().load(
-  '/effects/fire.json',
-  (effect) => {
-    scene.add(effect)
-    QuarksUtil.addToBatchRenderer(effect, batch)
-  },
-  undefined,
-  console.error,
-)
+const effect = await loadProjectEffect('/effects/fire.json')
+scene.add(effect)
+QuarksUtil.addToBatchRenderer(effect, batch)
 // In the game loop: batch.update(deltaSeconds)
 ```
 
-`load()` resolves image paths relative to the JSON URL automatically. If
-fetching JSON yourself and calling `parse()`, set the resource path explicitly:
-`new QuarksLoader().setResourcePath('/effects/').parse(json)`.
+**Compatibility:** stock `QuarksLoader.load()` does not resolve external geometry.
+Use the lightweight `/loader` entry point (no editor UI/CSS) for new saved projects;
+it also accepts older inline meshes, resolves textures relative to the JSON URL,
+and links sub-emitters after loading. An optional second argument accepts your
+Three.js `LoadingManager`.
+
+For a custom fetch pipeline, call `resolveMeshAssets(json, readMeshJson)` from the
+same entry point before passing the hydrated native document to `QuarksLoader`.
+The callback receives each project-relative mesh URL and returns its parsed JSON;
+set the Quarks loader resource path to the effect JSON directory for textures.
+
+External files reduce duplicated storage/transfer, not vertex counts or VRAM by
+themselves. There is no permanent global geometry cache; repeated game loads use
+your HTTP cache policy and instantiate native geometry for each loaded scene.
 
 `ready` resolves after initialization, not after every external image finishes
 loading. `destroy()` is idempotent, cancels animation/timers, disconnects resize

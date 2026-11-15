@@ -34,9 +34,9 @@ import { intervalBounds, particlePreviewDuration, updateParticlePreview } from '
 import style from './style.css?inline'
 import { bindColorEditor, colorEditorMarkup } from './color-editor.js'
 import { bindCurveEditor, curveEditorMarkup } from './curve-editor.js'
-import { readTextureFile, resolveFolderTextures, resolveLocalTextures } from './local-files.js'
+import { readTextureFile, resolveFolderAssets, resolveLocalTextures } from './local-files.js'
 import {
-  addTextureAsset,
+  addFolderAsset,
   existingFile,
   prepareFolderExport,
   textureAssetPath,
@@ -68,6 +68,8 @@ export { parseQuarksDocument, quarksDocumentSchema } from './document.js'
 export type { QuarksDocument } from './document.js'
 export { intervalBounds, updateParticlePreview } from './preview.js'
 export { readUnityPackage } from './unity-package.js'
+export { loadProjectEffect } from './project-loader.js'
+export { resolveMeshAssets } from './mesh-assets.js'
 export type { UnityPackage, UnityPrefabImport } from './unity-package.js'
 
 export interface ParticleEffect {
@@ -1642,6 +1644,14 @@ export function createParticleEditor(
   }
 
   function validateImportedDocument(json: QuarksDocument): void {
+    if (
+      (json.geometries as NativeRecord[] | undefined)?.some(
+        (geometry) => geometry.url !== undefined,
+      )
+    )
+      throw new Error(
+        'External meshes must be resolved first. Use Open project or import the project ZIP.',
+      )
     prepareNativeDocument(json)
     validateSubEmitters(json)
     // Validate runtime compatibility before replacing any in-session document.
@@ -1696,7 +1706,7 @@ export function createParticleEditor(
           const json = structuredClone(source)
           validateImportedDocument(json)
           const bundle = await prepareFolderExport(json, document.baseURI)
-          for (const blob of bundle.files.values()) await addTextureAsset(assets, blob)
+          for (const [path, blob] of bundle.files) await addFolderAsset(assets, path, blob)
           const name = String(
             nativeRoot(json).name ||
               path
@@ -1724,13 +1734,14 @@ export function createParticleEditor(
       if (destroyed) return
       if (staged.length) {
         for (const [path, blob] of assets) {
+          if (!blob.type.startsWith('image/')) continue
           const id = path.split('/').at(-1)!
           if (!library.has(id))
             library.set(id, await readTextureFile(new File([blob], id, { type: blob.type })))
         }
         if (destroyed) return
         if (projectDirectory) await writeFolderAssets(projectDirectory, assets)
-        else for (const blob of assets.values()) await addTextureAsset(pendingAssets, blob)
+        else for (const [path, blob] of assets) await addFolderAsset(pendingAssets, path, blob)
         if (destroyed) return
         releasePreview()
         effects.push(...staged)
@@ -1835,7 +1846,7 @@ export function createParticleEditor(
         const file = await handle.getFile()
         if (file.size > 64 * 1024 * 1024) throw new Error('JSON files must not exceed 64 MB.')
         const json = parseQuarksDocument(JSON.parse(await file.text()))
-        await resolveFolderTextures(json, directory)
+        await resolveFolderAssets(json, directory)
         validateImportedDocument(json)
         const id = slug(name.replace(/\.json$/i, ''))
         if (filenames.has(id)) throw new Error(`Duplicate effect id in project: ${id}`)
@@ -2270,8 +2281,15 @@ export function createParticleEditor(
           const source = (
             Array.isArray(value.geometries) ? value.geometries[0] : value
           ) as NativeRecord
+          if (source.url !== undefined)
+            throw new Error(
+              'Choose the mesh asset JSON itself, or use Open project to resolve external meshes.',
+            )
           validateNative(source)
-          const geometries = new THREE.ObjectLoader().parseGeometries([source])
+          // Imported geometry is a new document resource, even if its source has an existing UUID.
+          const geometries = new THREE.ObjectLoader().parseGeometries([
+            { ...source, uuid: THREE.MathUtils.generateUUID() },
+          ])
           const geometry = Object.values(geometries)[0]
           if (!geometry) throw new Error('Choose a Three.js geometry JSON document.')
           addGeometry(geometry)

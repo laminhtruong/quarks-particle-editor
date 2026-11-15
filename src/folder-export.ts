@@ -1,4 +1,4 @@
-import { parseQuarksDocument, type QuarksDocument } from './document.js'
+import { meshGeometrySchema, parseQuarksDocument, type QuarksDocument } from './document.js'
 
 const extensions: Record<string, string> = {
   'image/png': 'png',
@@ -7,19 +7,20 @@ const extensions: Record<string, string> = {
   'image/gif': 'gif',
 }
 
+async function contentHash(blob: Blob): Promise<string> {
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 16)
+}
+
 export async function textureAssetPath(blob: Blob): Promise<string> {
   const extension = extensions[blob.type.split(';')[0]!.trim().toLowerCase()]
   if (!extension || !blob.size)
     throw new Error(
       `Cannot export empty or unsupported texture (${blob.type || 'unknown MIME type'}).`,
     )
-  const hash = Array.from(
-    new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())),
-  )
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
-    .slice(0, 16)
-  return `assets/textures/${hash}.${extension}`
+  return `assets/textures/${await contentHash(blob)}.${extension}`
 }
 
 async function sameContents(left: Blob, right: Blob): Promise<boolean> {
@@ -29,19 +30,59 @@ async function sameContents(left: Blob, right: Blob): Promise<boolean> {
   return bytes.every((byte, index) => byte === expected[index])
 }
 
-export async function addTextureAsset(files: Map<string, Blob>, blob: Blob): Promise<string> {
-  const path = await textureAssetPath(blob)
+export async function addFolderAsset(
+  files: Map<string, Blob>,
+  path: string,
+  blob: Blob,
+): Promise<string> {
   const previous = files.get(path)
   if (previous && !(await sameContents(previous, blob)))
-    throw new Error(`Texture hash collision: ${path}`)
+    throw new Error(`Asset hash collision: ${path}`)
   files.set(path, blob)
   return path
 }
 
-/** Keep native image/texture UUIDs; deduplicate files by their original bytes. */
+export async function addTextureAsset(files: Map<string, Blob>, blob: Blob): Promise<string> {
+  return addFolderAsset(files, await textureAssetPath(blob), blob)
+}
+
+/** Externalize payloads without changing native UUID references or numeric precision. */
 export async function prepareFolderExport(source: QuarksDocument, baseUrl: string) {
   const json = parseQuarksDocument(structuredClone(source))
   const files = new Map<string, Blob>()
+  const geometries = (json.geometries ?? []) as Record<string, unknown>[]
+  for (const [index, geometry] of geometries.entries()) {
+    if (geometry.url !== undefined)
+      throw new Error('Resolve external meshes before saving a native document.')
+    // Parametric primitives already store only a few construction parameters, not vertex arrays.
+    if (geometry.data === undefined) continue
+    if (typeof geometry.uuid !== 'string' || !geometry.uuid)
+      throw new Error('Mesh geometry must have a UUID.')
+    const { uuid, name, metadata, ...payload } = meshGeometrySchema.parse(geometry)
+    const blob = new Blob(
+      [
+        JSON.stringify(payload, (_key, value) =>
+          value && typeof value === 'object' && !Array.isArray(value)
+            ? Object.fromEntries(
+                Object.keys(value)
+                  .sort()
+                  .map((key) => [key, value[key]]),
+              )
+            : value,
+        ),
+      ],
+      { type: 'application/json' },
+    )
+    if (blob.size > 64 * 1024 * 1024) throw new Error('Mesh JSON must not exceed 64 MB.')
+    const path = await addFolderAsset(files, `assets/meshes/${await contentHash(blob)}.json`, blob)
+    geometries[index] = {
+      uuid,
+      type: payload.type,
+      ...(name === undefined ? {} : { name }),
+      ...(metadata === undefined ? {} : { metadata }),
+      url: path,
+    }
+  }
   const urls = new Map<string, string>()
   const externalize = async (url: string): Promise<string> => {
     const cached = urls.get(url)
@@ -93,16 +134,26 @@ export async function writeFolderAssets(
 ): Promise<void> {
   if (files.size) {
     const assets = await directory.getDirectoryHandle('assets', { create: true })
-    const textures = await assets.getDirectoryHandle('textures', { create: true })
+    const folders = new Map<string, FileSystemDirectoryHandle>()
     for (const [path, blob] of files) {
-      if (!/^assets\/textures\/[a-z0-9-]+\.(png|jpg|webp|gif)$/.test(path))
-        throw new Error('Invalid texture asset path.')
+      if (
+        !/^assets\/(?:textures\/[a-z0-9-]+\.(?:png|jpg|webp|gif)|meshes\/[a-z0-9-]+\.json)$/.test(
+          path,
+        )
+      )
+        throw new Error('Invalid project asset path.')
+      const folder = path.split('/')[1]!
+      let directory = folders.get(folder)
+      if (!directory) {
+        directory = await assets.getDirectoryHandle(folder, { create: true })
+        folders.set(folder, directory)
+      }
       const name = path.split('/').at(-1)!
-      const existing = await existingFile(textures, name)
+      const existing = await existingFile(directory, name)
       if (existing) {
         if (!(await sameContents(await existing.getFile(), blob)))
           throw new Error(`Existing asset is corrupted or has conflicting contents: ${name}`)
-      } else await writeFile(textures, name, blob)
+      } else await writeFile(directory, name, blob)
     }
   }
 }

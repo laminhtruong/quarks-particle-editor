@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readTextureFile, resolveFolderTextures, resolveLocalTextures } from '../src/local-files'
+import { readTextureFile, resolveFolderAssets, resolveLocalTextures } from '../src/local-files'
 import type { QuarksDocument } from '../src/document'
 import { memoryFolder } from './fixtures/folder'
 
@@ -54,12 +54,12 @@ describe('local textures', () => {
       images: [{ url: [legacy, short, legacy] }, { url: 'https://cdn.test/remote.png' }],
     }
     const read = vi.spyOn(FileReader.prototype, 'readAsDataURL')
-    await resolveFolderTextures(json, folder.directory)
+    await resolveFolderAssets(json, folder.directory)
     expect(json.images![0]!.url).toEqual([png, png, png])
     expect(json.images![1]!.url).toBe('https://cdn.test/remote.png')
     expect(read).toHaveBeenCalledTimes(2)
     json.images = [{ url: 'missing.png' }]
-    await expect(resolveFolderTextures(json, folder.directory)).rejects.toThrow('Missing file')
+    await expect(resolveFolderAssets(json, folder.directory)).rejects.toThrow('Missing file')
   })
 
   it('reopens folder texture paths exactly, including arrays and duplicate basenames', async () => {
@@ -72,12 +72,12 @@ describe('local textures', () => {
       (path) => ({ ...file('a.png'), webkitRelativePath: `export/${path}` }) as File,
     )
     const read = vi.spyOn(FileReader.prototype, 'readAsDataURL')
-    await resolveFolderTextures(json, files)
+    await resolveFolderAssets(json, files)
     expect(json.images![0]!.url).toEqual([png, png, png])
     expect(read.mock.calls.map(([file]) => file)).toEqual(files)
     const missing = structuredClone(json)
     missing.images = [{ url: 'not-found.png' }]
-    await expect(resolveFolderTextures(missing, files)).rejects.toThrow('Missing texture')
+    await expect(resolveFolderAssets(missing, files)).rejects.toThrow('Missing asset')
   })
   it('reports whether new local files resolve missing images, without replacing remote URLs', () => {
     const json: QuarksDocument = {

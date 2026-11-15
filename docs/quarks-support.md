@@ -98,6 +98,11 @@ disabled authoring settings, but not the active effect.
 - Open/save project folders, browse raster textures (copied immediately into
   `assets/textures/` with 16-character content hashes), assign them, and reopen
   effects and unused textures together. Undo/redo use keyboard shortcuts.
+- Vertex/index mesh data is externalized as deduplicated `assets/meshes/<hash>.json`
+  files, without losing typed attributes or precision. Folder/ZIP imports hydrate
+  geometry for editing. Games use `quarks-particle-editor/loader`; stock
+  `QuarksLoader` alone does not resolve external mesh URLs. Host callbacks still
+  receive native inline geometry; compact parametric primitives stay inline.
 - **Effects → Import** adds all effects from a project ZIP or all convertible
   particle prefabs from a UnityPackage. Existing effects are kept; duplicate names
   get numeric suffixes. The import report lists conversion warnings and failures.

@@ -34,6 +34,10 @@
     "./document": {
       "types": "./dist/document.d.ts",
       "import": "./dist/document.js"
+    },
+    "./loader": {
+      "types": "./dist/project-loader.d.ts",
+      "import": "./dist/project-loader.js"
     }
   },
   "scripts": {

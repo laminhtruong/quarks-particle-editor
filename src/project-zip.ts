@@ -2,6 +2,7 @@ import { Unzip, UnzipInflate } from 'three/examples/jsm/libs/fflate.module.js'
 import { parseQuarksDocument } from './document.js'
 import { addTextureAsset } from './folder-export.js'
 import { readTextureFile, resolveTexturePaths } from './local-files.js'
+import { readMeshJson, resolveMeshAssets } from './mesh-assets.js'
 
 const MB = 1024 * 1024
 const imageTypes: Record<string, string> = {
@@ -102,6 +103,11 @@ export async function readProjectZip(file: File) {
   const effects = []
   for (const path of documents) {
     const json = parseQuarksDocument(JSON.parse(decoder.decode(entries.get(path)!)))
+    await resolveMeshAssets(json, async (path) => {
+      const bytes = entries.get(`${prefix}${decodeURIComponent(path)}`)
+      if (!bytes) throw new Error(`Missing mesh in project ZIP: ${path}`)
+      return readMeshJson(new Blob([bytes]))
+    })
     await resolveTexturePaths(json, async (path) => {
       const url = urls.get(path)
       if (!url) throw new Error(`Missing texture in project ZIP: ${path}`)

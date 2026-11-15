@@ -16,6 +16,36 @@ export const textureUrlSchema = z
     }
   }, 'texture must use an image data URL, a relative URL, or HTTP(S)')
 
+export const meshReferenceSchema = z
+  .object({
+    uuid: z.string().min(1),
+    type: z.enum(['BufferGeometry', 'InstancedBufferGeometry']),
+    url: z
+      .string()
+      .min(1)
+      .refine((value) => {
+        if (/[:\\?#\u0000-\u001f\u007f]/.test(value) || value.startsWith('/')) return false
+        try {
+          return decodeURIComponent(value)
+            .split('/')
+            .every(
+              (part) =>
+                part && part !== '.' && part !== '..' && !/[\\:\u0000-\u001f\u007f]/.test(part),
+            )
+        } catch {
+          return false
+        }
+      }, 'mesh must use a safe project-relative asset path'),
+  })
+  .passthrough()
+
+export const meshGeometrySchema = z
+  .object({
+    type: z.enum(['BufferGeometry', 'InstancedBufferGeometry']),
+    data: z.object({ attributes: record }).passthrough(),
+  })
+  .passthrough()
+
 export const quarksDocumentSchema = z
   .object({
     metadata: z.object({ version: z.number(), type: z.literal('Object') }).passthrough(),
@@ -24,6 +54,21 @@ export const quarksDocumentSchema = z
   })
   .passthrough()
   .superRefine((document, context) => {
+    const geometries = z.array(record).optional().safeParse(document.geometries)
+    if (!geometries.success)
+      context.addIssue({
+        code: 'custom',
+        path: ['geometries'],
+        message: 'Geometries must be an array of native geometry records.',
+      })
+    for (const [index, geometry] of (geometries.data ?? []).entries()) {
+      if (geometry.url !== undefined && !meshReferenceSchema.safeParse(geometry).success)
+        context.addIssue({
+          code: 'custom',
+          path: ['geometries', index],
+          message: 'Invalid external mesh reference.',
+        })
+    }
     if (document.object.type !== 'Group' && document.object.type !== 'Scene') {
       context.addIssue({
         code: 'custom',

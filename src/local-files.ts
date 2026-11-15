@@ -1,4 +1,5 @@
 import type { QuarksDocument } from './document.js'
+import { readMeshJson, resolveMeshAssets } from './mesh-assets.js'
 
 /** Only raster images: SVG and arbitrary data URLs are not local texture inputs. */
 export function readTextureFile(file: File): Promise<string> {
@@ -58,7 +59,7 @@ export function resolveLocalTextures(
 }
 
 /** Resolve against the selected folder, not the host page or filename-only library. */
-export async function resolveFolderTextures(
+export async function resolveFolderAssets(
   json: QuarksDocument,
   files: readonly File[] | FileSystemDirectoryHandle,
 ) {
@@ -67,7 +68,7 @@ export async function resolveFolderTextures(
       ? files.map((file) => [file.webkitRelativePath.split('/').slice(1).join('/'), file])
       : [],
   )
-  await resolveTexturePaths(json, async (path) => {
+  const read = async (path: string): Promise<File> => {
     let file = local.get(path)
     if (!Array.isArray(files)) {
       let directory = files as FileSystemDirectoryHandle
@@ -75,9 +76,11 @@ export async function resolveFolderTextures(
       for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part)
       file = await (await directory.getFileHandle(parts.at(-1)!)).getFile()
     }
-    if (!file) throw new Error(`Missing texture in selected folder: ${path}`)
-    return readTextureFile(file)
-  })
+    if (!file) throw new Error(`Missing asset in selected folder: ${path}`)
+    return file
+  }
+  await resolveMeshAssets(json, async (path) => readMeshJson(await read(decodeURIComponent(path))))
+  await resolveTexturePaths(json, async (path) => readTextureFile(await read(path)))
 }
 
 /** Share exact project-relative URL semantics for folders and ZIP imports. */

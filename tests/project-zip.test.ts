@@ -8,6 +8,8 @@ import {
 } from 'three/examples/jsm/libs/fflate.module.js'
 import { readProjectZip } from '../src/project-zip'
 import { readTextureFile } from '../src/local-files'
+import { prepareFolderExport } from '../src/folder-export'
+import { meshEffect } from './fixtures/mesh'
 
 vi.mock('../src/local-files', async (original) => ({
   ...(await original<typeof import('../src/local-files')>()),
@@ -38,6 +40,27 @@ const archive = (entries: Record<string, string>, level: 0 | 6 = 6) =>
   )
 
 describe('project ZIP import', () => {
+  it('resolves external meshes from a wrapped project and reports missing/corrupt mesh files', async () => {
+    const source = meshEffect('zip-mesh')
+    const bundle = await prepareFolderExport(source.json, 'https://game.test/')
+    const path = [...bundle.files.keys()][0]!
+    const payload = await bundle.files.get(path)!.text()
+    ;(bundle.json.geometries as Record<string, unknown>[])[0]!.url =
+      'assets/meshes/triangle%20one.json'
+    const json = JSON.stringify(bundle.json)
+    const read = await readProjectZip(
+      archive({ 'project/effect.json': json, 'project/assets/meshes/triangle one.json': payload }),
+    )
+    expect(read.effects[0]!.json.geometries).toEqual(source.json.geometries)
+    const savedAgain = await prepareFolderExport(read.effects[0]!.json, 'https://game.test/')
+    expect([...savedAgain.files.keys()]).toEqual([path])
+    await expect(readProjectZip(archive({ 'effect.json': json }))).rejects.toThrow('Missing mesh')
+    await expect(
+      readProjectZip(
+        archive({ 'effect.json': json, 'assets/meshes/triangle one.json': 'invalid' }),
+      ),
+    ).rejects.toThrow()
+  })
   it.each([
     ['', 0],
     ['My Project/', 6],
