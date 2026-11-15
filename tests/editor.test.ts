@@ -226,6 +226,25 @@ describe('project-independent particle editor', () => {
     expect(root.querySelector('.toast').textContent).toContain('must be positive')
   })
 
+  it('accepts emitter rotation in degrees and saves radians', async () => {
+    class InputStub extends ElementStub {
+      dataset = { bind: 'emitter.rotation.x' }
+      type = 'number'
+      value = '90'
+    }
+    vi.stubGlobal('HTMLInputElement', InputStub)
+    vi.stubGlobal('HTMLSelectElement', class {})
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Emitter Rotation (deg)')
+    root.listeners.get('input')?.({ target: new InputStub() })
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const emitter = saveEffect.mock.calls[0]![1].object.children![0] as { matrix: number[] }
+    expect(emitter.matrix[6]).toBeCloseTo(1)
+  })
+
   it('adds, disables, and restores a registered behavior through the inspector', async () => {
     const saveEffect = vi.fn(async (_id: string, _json: unknown) => {})
     const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })

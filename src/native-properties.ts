@@ -404,6 +404,11 @@ export function renderProperty(
   if (!value || typeof value !== 'object') return ''
   const object = value as NativeRecord
   const type = typeof object.type === 'string' ? object.type : ''
+  const compactStartScalar =
+    path.length === 2 &&
+    path[0] === 'ps' &&
+    ['startLife', 'startSpeed', 'startSize', 'startRotation'].includes(key) &&
+    scalarTypes.includes(type)
   let typeControl = ''
   if (Object.hasOwn(generatorTemplates, type)) {
     const choices = generatorChoices(path, owner)
@@ -445,6 +450,30 @@ export function renderProperty(
         )
         .join('')}" data-native-color="${attr(path)}"></label>`
     : ''
+  if (compactStartScalar) {
+    const labels: Record<string, string> = {
+      ConstantValue: 'Constant',
+      PiecewiseBezier: 'Curve',
+      IntervalValue: 'Random Between Two Constants',
+    }
+    const mode = `<select class="native-generator-mode" aria-label="${escape(label)} mode" data-native-action="generator" data-native-path="${attr(path)}">${options(
+      generatorChoices(path, owner).map((item) => [item, labels[item] ?? propertyLabel(item)]),
+      type,
+    )}</select>`
+    const input = (part: string, current: unknown) =>
+      `<input class="native-generator-value ${part === 'value' ? 'constant' : ''}" type="number" step="any" aria-label="${escape(label)} ${part === 'value' ? 'value' : part.toUpperCase()}" value="${escape(current)}" data-native-path="${attr([...path, part])}" data-native-kind="number">`
+    const values =
+      type === 'ConstantValue'
+        ? input('value', object.value)
+        : type === 'IntervalValue'
+          ? `${input('a', object.a)}${input('b', object.b)}`
+          : ''
+    const fields = Object.entries(object)
+      .filter(([name]) => !['type', 'uuid', 'metadata', 'subType'].includes(name))
+      .map(([name, item]) => renderProperty(item, [...path, name], context, object))
+      .join('')
+    return `<div class="native-generator"><div class="native-generator-head"><span class="native-generator-label">${escape(label)}</span>${values}${mode}</div>${type === 'PiecewiseBezier' ? `${preview}${fields}` : ''}</div>`
+  }
   return `<fieldset class="native-group"><legend>${escape(label)}</legend>${typeControl}${preview}${swatch}${Object.entries(
     object,
   )

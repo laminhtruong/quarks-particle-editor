@@ -297,6 +297,7 @@ export function createParticleEditor(
     const effect = currentEffect()
     if (!effect || !currentGroup) return
     nativeRoot(effect.json).name = currentGroup.name || effect.id
+    currentGroup.updateMatrixWorld(true)
     effect.json = serializeGroup(currentGroup)
   }
 
@@ -695,18 +696,16 @@ export function createParticleEditor(
     const markup = `
     <div class="panel-tab">Inspector</div><header class="inspector-head"><div class="inspector-kicker">Particle System</div><input class="inspector-title" value="${esc(displayName(effect))}" aria-label="Effect name" data-bind="effect.name"><div class="inspector-sub">${esc(emitter.name || `Particle System ${systemIndex + 1}`)} <span>\u{b7}</span> ${esc(effect.id)}</div></header>
     <section class="inspect-section"><h3>Transform</h3><div class="field-grid">
-      <label class="field"><span>Rotation X (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.x * 180) / Math.PI)}" data-bind="effect.rotation.x"></label>
-      <label class="field"><span>Rotation Y (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.y * 180) / Math.PI)}" data-bind="effect.rotation.y"></label>
-      <label class="field"><span>Rotation Z (deg)</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation.z * 180) / Math.PI)}" data-bind="effect.rotation.z"></label>
-      ${(['position', 'scale'] as const).map((property) => (['x', 'y', 'z'] as const).map((axis) => `<label class="field"><span>Root ${propertyLabel(property)} ${axis.toUpperCase()}</span><input type="number" step="any" value="${num(currentGroup![property][axis])}" data-bind="effect.${property}.${axis}"></label>`).join('')).join('')}
-      ${(['position', 'rotation', 'scale'] as const).map((property) => (['x', 'y', 'z'] as const).map((axis) => `<label class="field"><span>Emitter ${propertyLabel(property)} ${axis.toUpperCase()}${property === 'rotation' ? ' (rad)' : ''}</span><input type="number" step="any" value="${num(emitter[property][axis])}" data-bind="emitter.${property}.${axis}"></label>`).join('')).join('')}
+      <div class="axis-row"><span class="axis-title">Rotation (deg)</span>${(['x', 'y', 'z'] as const).map((axis) => `<label class="axis-field"><span>${axis.toUpperCase()}</span><input type="number" min="-360" max="360" step="1" value="${num((effectRotation[axis] * 180) / Math.PI)}" data-bind="effect.rotation.${axis}"></label>`).join('')}</div>
+      ${(['position', 'scale'] as const).map((property) => `<div class="axis-row"><span class="axis-title">Root ${propertyLabel(property)}</span>${(['x', 'y', 'z'] as const).map((axis) => `<label class="axis-field"><span>${axis.toUpperCase()}</span><input type="number" step="any" value="${num(currentGroup![property][axis])}" data-bind="effect.${property}.${axis}"></label>`).join('')}</div>`).join('')}
+      ${(['position', 'rotation', 'scale'] as const).map((property) => `<div class="axis-row"><span class="axis-title">Emitter ${propertyLabel(property)}${property === 'rotation' ? ' (deg)' : ''}</span>${(['x', 'y', 'z'] as const).map((axis) => `<label class="axis-field"><span>${axis.toUpperCase()}</span><input type="number" step="any" value="${num(property === 'rotation' ? (emitter[property][axis] * 180) / Math.PI : emitter[property][axis])}" data-bind="emitter.${property}.${axis}"></label>`).join('')}</div>`).join('')}
     </div><p class="hint">Rotates the native root Group and all its emitters. Angles are degrees.</p></section>
     <section class="inspect-section"><h3>Main</h3><div class="field-grid">
       <label class="field"><span>Duration (s)</span><input type="number" min="0.01" step="0.05" value="${num(system.duration)}" data-bind="duration"></label>
-      <label class="check-field"><input type="checkbox" ${system.looping ? 'checked' : ''} data-bind="looping"> Looping</label>
+      <label class="check-field"><span>Looping</span><input type="checkbox" ${system.looping ? 'checked' : ''} data-bind="looping"></label>
       <label class="field"><span>Simulation Space</span><select data-bind="worldSpace"><option value="false" ${system.worldSpace ? '' : 'selected'}>Local</option><option value="true" ${system.worldSpace ? 'selected' : ''}>World</option></select></label>
-      <label class="check-field"><input type="checkbox" ${system.prewarm ? 'checked' : ''} data-bind="prewarm"> Prewarm</label>
-      <label class="check-field"><input type="checkbox" ${system.autoDestroy ? 'checked' : ''} data-bind="autoDestroy"> Auto destroy</label>
+      <label class="check-field"><span>Prewarm</span><input type="checkbox" ${system.prewarm ? 'checked' : ''} data-bind="prewarm"></label>
+      <label class="check-field"><span>Auto destroy</span><input type="checkbox" ${system.autoDestroy ? 'checked' : ''} data-bind="autoDestroy"></label>
       ${renderProperties(ps, ['startLife', 'startSpeed', 'startSize', 'startRotation', 'startColor', 'onlyUsedByOther'], context)}
       <label class="field"><span>Gravity Y</span><input type="number" step="0.5" value="${num(gravityOf(system))}" data-bind="gravity"></label>
     </div></section>
@@ -1234,7 +1233,8 @@ export function createParticleEditor(
         'position' | 'rotation' | 'scale',
         'x' | 'y' | 'z',
       ]
-      currentEmitter()![property][axis] = Number(value)
+      currentEmitter()![property][axis] =
+        property === 'rotation' ? (Number(value) * Math.PI) / 180 : Number(value)
     } else if (bind.startsWith('effect.position.') || bind.startsWith('effect.scale.')) {
       const [, property, axis] = bind.split('.') as [string, 'position' | 'scale', 'x' | 'y' | 'z']
       currentGroup![property][axis] = Number(value)

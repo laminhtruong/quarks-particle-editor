@@ -111,6 +111,25 @@ describe('installed Quarks catalog', () => {
     ).toEqual(['AxisAngle', 'Euler', 'RandomQuat'])
   })
 
+  it('renders scalar start generators compactly with the mode beside the property name', () => {
+    const fields = renderProperty(generatorTemplates.IntervalValue!(), ['ps', 'startLife'], context)
+    expect(fields).toContain('class="native-generator"')
+    expect(fields).toContain('<span class="native-generator-label">Start Life</span>')
+    expect(fields).toContain('class="native-generator-mode"')
+    expect(fields).toContain('Random Between Two Constants')
+    expect(fields).not.toContain('<span>A</span>')
+    expect(fields).not.toContain('<span>B</span>')
+    expect(fields.match(/type="number"/g)).toHaveLength(2)
+    expect(fields).not.toContain('native-group')
+    const curve = renderProperty(
+      generatorTemplates.PiecewiseBezier!(),
+      ['ps', 'startLife'],
+      context,
+    )
+    expect(curve).toContain('class="native-generator"')
+    expect(curve).toContain('Bezier curve preview')
+  })
+
   it('uses all burst parameters and permits multiple bursts', () => {
     const node = { ps: { emissionBursts: [] } }
     appendNativeItem(node, ['ps', 'emissionBursts'])

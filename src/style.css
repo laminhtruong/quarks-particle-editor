@@ -486,9 +486,28 @@ button.hierarchy-row:hover {
   grid-template-columns: minmax(0, 1fr);
   gap: 4px;
 }
+.axis-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 34%) repeat(3, minmax(0, 1fr));
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.axis-title,
+.axis-field > span {
+  color: var(--text);
+  font-size: 11px;
+}
+.axis-field {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
 .field {
   display: grid;
-  grid-template-columns: minmax(100px, 45%) minmax(0, 1fr);
+  grid-template-columns: minmax(100px, 36%) minmax(0, 1fr);
   align-items: center;
   gap: 7px;
   min-width: 0;
@@ -502,6 +521,9 @@ button.hierarchy-row:hover {
   font-size: 11px;
 }
 .field input:not([type='checkbox']),
+.axis-field input,
+.native-generator input,
+.native-generator select,
 .field select,
 .color-stop input,
 .modal input {
@@ -518,17 +540,16 @@ button.hierarchy-row:hover {
   padding: 1px 2px;
 }
 .check-field {
-  display: flex;
-  flex-direction: row-reverse;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: minmax(100px, 36%) minmax(0, 1fr);
   align-items: center;
   gap: 7px;
   min-height: 21px;
   font-size: 11px;
 }
 .check-field input {
-  margin: 0 0 0 auto;
-  width: 52%;
+  margin: 0;
+  justify-self: start;
   accent-color: var(--accent);
 }
 .asset-preview {
@@ -598,6 +619,33 @@ button.hierarchy-row:hover {
 .native-json summary {
   font-size: 11px;
 }
+.native-generator {
+  margin: 3px 0;
+}
+.native-generator-head {
+  display: grid;
+  grid-template-columns: minmax(120px, 34%) repeat(2, minmax(0, 1fr)) 24px;
+  align-items: center;
+  gap: 4px 7px;
+}
+.native-generator-label {
+  font-size: 11px;
+}
+.native-generator-mode {
+  width: 24px !important;
+  min-width: 24px;
+  padding: 0;
+  appearance: auto;
+  font-size: 0;
+}
+.native-generator-mode option {
+  color: var(--text);
+  background: #292929;
+  font-size: 11px;
+}
+.native-generator-value.constant {
+  grid-column: 2 / 4;
+}
 .native-group {
   min-width: 0;
   margin: 6px 0;
@@ -611,7 +659,7 @@ button.hierarchy-row:hover {
 }
 .native-group .field {
   margin: 3px 0;
-  grid-template-columns: minmax(75px, 44%) minmax(0, 1fr);
+  grid-template-columns: minmax(75px, 36%) minmax(0, 1fr);
 }
 .native-group input[type='text'] {
   width: 100%;
