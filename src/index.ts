@@ -32,8 +32,19 @@ import {
 import { parseQuarksDocument, textureUrlSchema, type QuarksDocument } from './document.js'
 import { intervalBounds, particlePreviewDuration, updateParticlePreview } from './preview.js'
 import style from './style.css?inline'
-import { readTextureFile, resolveLocalTextures } from './local-files.js'
+import { bindColorEditor, colorEditorMarkup } from './color-editor.js'
+import { bindCurveEditor, curveEditorMarkup } from './curve-editor.js'
+import { readTextureFile, resolveFolderTextures, resolveLocalTextures } from './local-files.js'
+import {
+  addTextureAsset,
+  existingFile,
+  prepareFolderExport,
+  textureAssetPath,
+  writeFolderAssets,
+  writeFolderExport,
+} from './folder-export.js'
 import { readUnityPackage } from './unity-package.js'
+import { readProjectZip } from './project-zip.js'
 import {
   appendNativeItem,
   behaviorSlots,
@@ -68,7 +79,7 @@ export interface ParticleEffect {
 
 export interface ParticleTexture {
   id: string
-  /** URL stored in exported JSON; resolved relative to the host page for preview. */
+  /** Preview/project URL; folder export copies the image to a relative asset file. */
   url: string
 }
 
@@ -107,7 +118,7 @@ export function createParticleEditor(
   <div class="studio">
     <header class="topbar">
       <div class="brand"><div class="brand-title">Quarks Particle Editor</div></div>
-      <div class="top-actions"><button class="btn" type="button" data-action="import" title="Open a native Quarks JSON file (Ctrl+O)">Open JSON</button><button class="btn" type="button" data-action="import-unity">Import Unity Package</button><button class="btn" type="button" data-action="import-texture">Import Textures</button><button class="btn ghost" type="button" data-action="undo" title="Undo (Ctrl+Z)" disabled>Undo</button><button class="btn ghost" type="button" data-action="redo" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button><span class="save-state" data-save-state>No unsaved changes</span><button class="btn" type="button" data-action="export">Export JSON</button><button class="btn primary" type="button" data-action="save">${options.saveEffect ? 'Save to Project' : 'Download JSON'}</button></div>
+      <div class="top-actions"><button class="btn" type="button" data-action="open-project" title="Open a project folder (Ctrl+O)">Open project</button><span class="save-state" data-save-state>No unsaved changes</span><button class="btn primary" type="button" data-action="save" title="Save project (Ctrl+S)">Save project</button></div>
     </header>
     <main class="workspace">
       <aside class="left-panel">
@@ -117,13 +128,13 @@ export function createParticleEditor(
           <div data-system-list></div>
           <div class="system-actions"><button class="btn small" type="button" data-action="add-system">+ Add</button><button class="btn small" type="button" data-action="duplicate-system" title="Duplicate selected system">Copy</button><button class="btn small" type="button" data-action="move-system-up" title="Move system up">Up</button><button class="btn small" type="button" data-action="move-system-down" title="Move system down">Down</button><button class="btn small danger" type="button" data-action="remove-system" title="Remove selected system">-</button></div>
         </section>
-        <section class="panel-block"><div class="hint">Open a JSON file or create a particle system to begin.<br><br>Space: Play / Pause<br>R: Restart &nbsp; F: Frame selected<br>Ctrl+O: Open &nbsp; Ctrl+S: Save / Download<br>Drag: Orbit &nbsp; Scroll: Zoom</div></section>
+        <section class="panel-block"><div class="hint">Open a project folder or create a particle system to begin.<br><br>Space: Play / Pause<br>R: Restart &nbsp; F: Frame selected<br>Ctrl+O: Open &nbsp; Ctrl+S: Save<br>Ctrl+Z: Undo &nbsp; Ctrl+Shift+Z: Redo<br>Drag: Orbit &nbsp; Scroll: Zoom</div></section>
       </aside>
       <section class="stage">
         <div class="panel-tab">Scene <span class="hint">Perspective \u{b7} Quarks runtime</span></div>
         <div class="viewport">
           <canvas id="vfx-canvas" aria-label="Particle effect preview"></canvas>
-          <div class="viewport-label"><strong>Particle Effect</strong><span>Drop JSON, a .unitypackage, or textures here</span></div>
+          <div class="viewport-label"><strong>Particle Effect</strong><span>Drop a project ZIP, UnityPackage, JSON, or textures here</span></div>
           <div class="viewport-actions"><button class="btn" type="button" data-action="frame">Frame</button><button class="btn" type="button" data-action="grid">Grid</button></div>
         </div>
         <div class="timeline">
@@ -131,16 +142,15 @@ export function createParticleEditor(
           <div class="timeline-track"><div class="timeline-progress" data-progress></div><div class="timeline-knob" data-knob></div><div class="timeline-ticks"><span>0s</span><span>25%</span><span>50%</span><span>75%</span><span data-end-tick>1s</span></div><input class="timeline-input" type="range" min="0" max="1000" value="0" aria-label="Preview timeline" data-timeline></div>
         </div>
         <section class="project-panel" aria-label="Project assets">
-          <div class="panel-tab">Project <span class="hint">Local session \u{b7} files stay in your browser</span></div>
+          <div class="panel-tab">Project <span class="hint" data-project-folder>No project folder selected</span></div>
           <div class="project-toolbar"><input class="search" type="search" placeholder="Search effects" aria-label="Search effects" data-search><button class="btn small" type="button" data-action="new">+ New effect</button><button class="btn small" type="button" data-action="duplicate" title="Duplicate selected effect">Duplicate</button></div>
-          <div class="project-columns"><section><div class="section-title"><span>Effects</span><span data-effect-count>00</span></div><div class="effect-list" data-effect-list></div><details class="unity-import-report" data-unity-report hidden><summary>Unity import report</summary><pre data-unity-report-text></pre></details></section><section><div class="section-title"><span>Textures</span><button class="btn small" type="button" data-action="import-texture">+ Browse</button></div><div class="texture-list" data-texture-list></div></section></div>
+          <div class="project-columns"><section><div class="section-title"><span>Effects <span data-effect-count>00</span></span><button class="btn small" type="button" data-action="import-effects">Import</button></div><div class="effect-list" data-effect-list></div><details class="unity-import-report" data-unity-report hidden><summary>Import report</summary><pre data-unity-report-text></pre></details></section><section><div class="section-title"><span>Textures</span><button class="btn small" type="button" data-action="import-texture">+ Browse</button></div><div class="texture-list" data-texture-list></div></section></div>
         </section>
       </section>
       <aside class="right-panel" data-inspector></aside>
     </main>
   </div>
-  <input type="file" accept="application/json,.json" hidden data-file-input>
-  <input type="file" accept=".unitypackage" hidden data-unity-input>
+  <input type="file" accept=".zip,.unitypackage" hidden data-effects-input>
   <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple hidden data-texture-input>
   <input type="file" accept="application/json,.json" hidden data-geometry-input>
   <div class="toast" role="status" aria-live="polite" hidden></div>
@@ -173,6 +183,10 @@ export function createParticleEditor(
   const defaults = new Map<string, EffectFile>()
   const savedEffects = new Map<string, EffectFile>()
   let effects: EffectFile[] = []
+  let projectDirectory: FileSystemDirectoryHandle | undefined
+  const projectFiles = new Map<string, string>()
+  const deletedProjectFiles = new Set<string>()
+  const pendingAssets = new Map<string, Blob>()
   const savedIds = new Set<string>()
   let currentId = ''
   let systemIndex = 0
@@ -202,7 +216,14 @@ export function createParticleEditor(
   const undoStack: EffectFile[] = []
   const redoStack: EffectFile[] = []
   const collapsedModules = new Set<string>()
-  let colorEditor: { path: NativePath; type: 'color' | 'gradient'; value: NativeRecord } | undefined
+  let propertyEditor:
+    | {
+        path: NativePath
+        type: 'color' | 'gradient' | 'curve'
+        value: NativeRecord
+        material?: boolean
+      }
+    | undefined
 
   const currentEffect = (): EffectFile | undefined =>
     effects.find((effect) => effect.id === currentId)
@@ -230,52 +251,6 @@ export function createParticleEditor(
       number,
       number,
     ]
-
-  function editorColorHex(color: NativeRecord): string {
-    return asHex(['r', 'g', 'b'].map((key) => Number(color[key] ?? 0)))
-  }
-
-  function editorRgba(color: NativeRecord): string {
-    return `rgba(${['r', 'g', 'b'].map((key) => Math.round(Math.max(0, Math.min(1, Number(color[key] ?? 0))) * 255)).join(',')},${Math.max(0, Math.min(1, Number(color.a ?? 1)))})`
-  }
-
-  function editorGradientCss(value: NativeRecord): string {
-    const color = value.color as NativeRecord
-    const alpha = value.alpha as NativeRecord
-    const colors = (color.keys ?? []) as NativeRecord[]
-    const alphas = (alpha.keys ?? []) as NativeRecord[]
-    const alphaAt = (pos: number) => {
-      const next = alphas.findIndex((key) => Number(key.pos) >= pos)
-      if (next <= 0) return Number(alphas[Math.max(0, next)]?.value ?? 1)
-      if (next < 0) return Number(alphas.at(-1)?.value ?? 1)
-      const before = alphas[next - 1]!
-      const after = alphas[next]!
-      const span = Number(after.pos) - Number(before.pos)
-      return (
-        Number(before.value) +
-        (Number(after.value) - Number(before.value)) *
-          (span ? (pos - Number(before.pos)) / span : 0)
-      )
-    }
-    return `linear-gradient(90deg,${
-      colors
-        .map((key) => {
-          const rgb = key.value as NativeRecord
-          return `rgba(${['r', 'g', 'b'].map((channel) => Math.round(Math.max(0, Math.min(1, Number(rgb[channel] ?? 0))) * 255)).join(',')},${Math.max(0, Math.min(1, alphaAt(Number(key.pos))))}) ${Math.max(0, Math.min(1, Number(key.pos))) * 100}%`
-        })
-        .join(',') || 'transparent,transparent'
-    })`
-  }
-
-  function colorEditorMarkup(): string {
-    if (!colorEditor) return ''
-    const { type, value } = colorEditor
-    const contents =
-      type === 'color'
-        ? `<div class="color-editor-picker"><input type="color" value="${editorColorHex(value)}" aria-label="Color" data-editor-color="hex"><div class="color-editor-sample" style="--swatch:${editorRgba(value)}" role="img" aria-label="Color with alpha preview"></div><div class="color-editor-channels">${['r', 'g', 'b'].map((channel) => `<label>${channel.toUpperCase()}<input type="number" min="0" max="255" step="1" value="${Math.round(Math.max(0, Math.min(1, Number(value[channel] ?? 0))) * 255)}" data-editor-color="${channel}"></label>`).join('')}<label>A<input type="number" min="0" max="255" step="1" value="${Math.round(Math.max(0, Math.min(1, Number(value.a ?? 1))) * 255)}" data-editor-color="alpha"></label></div><label class="color-editor-alpha">Alpha<input type="range" min="0" max="255" step="1" value="${Math.round(Math.max(0, Math.min(1, Number(value.a ?? 1))) * 255)}" data-editor-color="alpha"></label></div>`
-        : `<div class="gradient-editor-preview" style="background:${editorGradientCss(value)}"></div><section class="gradient-editor-section"><header><strong>Color</strong><button class="btn small" type="button" data-native-action="gradient-add" data-editor-part="color">+ Key</button></header>${((value.color as NativeRecord).keys as NativeRecord[]).map((key, index) => `<div class="gradient-editor-row"><input type="number" min="0" max="1" step="0.01" value="${num(Number(key.pos), 3)}" aria-label="Color key position" data-editor-stop="color" data-editor-index="${index}" data-editor-field="pos"><input type="color" value="${editorColorHex(key.value as NativeRecord)}" aria-label="Color key color" data-editor-stop="color" data-editor-index="${index}" data-editor-field="color"><button class="btn small danger" type="button" aria-label="Remove color key" data-native-action="gradient-remove" data-editor-part="color" data-editor-index="${index}" ${((value.color as NativeRecord).keys as NativeRecord[]).length <= 2 ? 'disabled' : ''}>&times;</button></div>`).join('')}</section><section class="gradient-editor-section"><header><strong>Alpha</strong><button class="btn small" type="button" data-native-action="gradient-add" data-editor-part="alpha">+ Key</button></header>${((value.alpha as NativeRecord).keys as NativeRecord[]).map((key, index) => `<div class="gradient-editor-row"><input type="number" min="0" max="1" step="0.01" value="${num(Number(key.pos), 3)}" aria-label="Alpha key position" data-editor-stop="alpha" data-editor-index="${index}" data-editor-field="pos"><input type="number" min="0" max="1" step="0.01" value="${num(Number(key.value), 3)}" aria-label="Alpha value" data-editor-stop="alpha" data-editor-index="${index}" data-editor-field="value"><button class="btn small danger" type="button" aria-label="Remove alpha key" data-native-action="gradient-remove" data-editor-part="alpha" data-editor-index="${index}" ${((value.alpha as NativeRecord).keys as NativeRecord[]).length <= 2 ? 'disabled' : ''}>&times;</button></div>`).join('')}</section>`
-    return `<dialog class="color-editor-dialog"><header><strong>${type === 'color' ? 'Color' : 'Gradient'}</strong><button class="btn small" type="button" aria-label="Close" data-native-action="color-editor-cancel">&times;</button></header><div class="color-editor-body">${contents}</div><footer><button class="btn" type="button" data-native-action="color-editor-cancel">Cancel</button><button class="btn primary" type="button" data-native-action="color-editor-apply">Apply</button></footer></dialog>`
-  }
 
   function emitterNodes(rootNode: NativeNode): NativeNode[] {
     const found: NativeNode[] = []
@@ -339,11 +314,6 @@ export function createParticleEditor(
     saveState.classList.remove('dirty')
   }
 
-  function updateHistoryButtons(): void {
-    $<HTMLButtonElement>('[data-action="undo"]').disabled = undoStack.length === 0
-    $<HTMLButtonElement>('[data-action="redo"]').disabled = redoStack.length === 0
-  }
-
   function syncEffect(): void {
     const effect = currentEffect()
     if (!effect || !currentGroup) return
@@ -359,7 +329,6 @@ export function createParticleEditor(
     undoStack.push(structuredClone(effect))
     if (undoStack.length > 100) undoStack.shift()
     redoStack.length = 0
-    updateHistoryButtons()
   }
 
   function travelHistory(from: EffectFile[], to: EffectFile[]): void {
@@ -376,7 +345,6 @@ export function createParticleEditor(
     renderSystems()
     resetPreview()
     renderInspector()
-    updateHistoryButtons()
   }
 
   function isBuiltIn(id: string): boolean {
@@ -407,7 +375,7 @@ export function createParticleEditor(
       systemList.innerHTML = '<div class="empty-list">Create or import an effect.</div>'
       return
     }
-    systemList.innerHTML = `<div class="hierarchy-row"><span>\u{2304}</span><span class="tree-icon">\u{2733}</span><strong>${esc(displayName(effect))}</strong><span class="row-meta">GROUP</span></div>${nodes.map((node, index) => `<div class="hierarchy-row${index === systemIndex ? ' active' : ''}"><input type="checkbox" data-system-enabled="${index}" aria-label="Enable ${esc(node.name || `Particle System ${index + 1}`)}" title="Show in preview and include in exported JSON"${node.visible !== false ? ' checked' : ''}><button class="system-select" type="button" data-system="${index}"><span class="tree-icon">\u{25a7}</span><span>${esc(node.name || `Particle System ${index + 1}`)}</span><span class="row-meta">${index + 1}</span></button></div>`).join('')}`
+    systemList.innerHTML = `<div class="hierarchy-row"><span>\u{2304}</span><span class="tree-icon">\u{2733}</span><strong>${esc(displayName(effect))}</strong><span class="row-meta">GROUP</span></div>${nodes.map((node, index) => `<div class="hierarchy-row${index === systemIndex ? ' active' : ''}"><input type="checkbox" data-system-enabled="${index}" aria-label="Enable ${esc(node.name || `Particle System ${index + 1}`)}" title="Enable in preview; visibility is saved with the project"${node.visible !== false ? ' checked' : ''}><button class="system-select" type="button" data-system="${index}"><span class="tree-icon">\u{25a7}</span><span>${esc(node.name || `Particle System ${index + 1}`)}</span><span class="row-meta">${index + 1}</span></button></div>`).join('')}`
   }
 
   function colorOf(system: ParticleSystem): [number, number, number, number] {
@@ -415,29 +383,12 @@ export function createParticleEditor(
     return color ? [color.x, color.y, color.z, color.w] : [1, 1, 1, 1]
   }
 
-  function colorStops(
-    system: ParticleSystem,
-  ): { colors: [number, number, number, number][]; alphas: [number, number][] } | undefined {
-    const behavior = system.behaviors.find((item) => item.type === 'ColorOverLife') as
-      ColorOverLife | undefined
-    if (!behavior || !(behavior.color instanceof Gradient)) return undefined
-    return {
-      colors: behavior.color.color.keys.map(([value, time]) => [time, value.x, value.y, value.z]),
-      alphas: behavior.color.alpha.keys.map(([value, time]) => [time, value]),
-    }
-  }
-
-  function sizeCurve(system: ParticleSystem): [number, number][] | undefined {
-    const behavior = system.behaviors.find((item) => item.type === 'SizeOverLife') as
-      SizeOverLife | undefined
-    const curve = behavior?.size as unknown as
-      { functions?: Array<[{ p: number[] }, number]> } | undefined
-    const segments = curve?.functions
-    if (!segments?.length) return undefined
-    const points = segments.map(([bezier, time]) => [time, bezier.p[0] ?? 1] as [number, number])
-    const last = segments.at(-1)?.[0]
-    points.push([1, last?.p[3] ?? 1])
-    return points
+  function renderSizeCurve(system: ParticleSystem, context: PropertyContext): string {
+    const index = system.behaviors.findIndex((item) => item.type === 'SizeOverLife')
+    const behavior = system.behaviors[index] as SizeOverLife | undefined
+    return behavior
+      ? renderProperty(behavior.size.toJSON(), ['ps', 'behaviors', index, 'size'], context)
+      : '<button class="btn small" type="button" data-action="enable-curve">+ Add SizeOverLife</button>'
   }
 
   function frameRange(system: ParticleSystem): [number, number] | undefined {
@@ -559,7 +510,6 @@ export function createParticleEditor(
       renderEffects()
       renderSystems()
       renderInspector()
-      updateHistoryButtons()
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Invalid Quarks property', true)
       renderInspector()
@@ -590,58 +540,45 @@ export function createParticleEditor(
   function nativeAction(target: HTMLElement): void {
     const action = target.dataset.nativeAction
     const path = JSON.parse(target.dataset.nativePath ?? '[]') as NativePath
-    if (action === 'edit-color' || action === 'edit-gradient') {
+    if (action === 'edit-color' || action === 'edit-gradient' || action === 'edit-curve') {
       const effect = currentEffect()
       if (!effect) return
       const value = getNativeValue(
         { ...nativeNode(effect.json, systemIndex), document: effect.json },
         path,
       )
-      if (!value || typeof value !== 'object') return
-      colorEditor = {
+      if (value === null || (typeof value !== 'object' && typeof value !== 'number')) return
+      propertyEditor = {
         path,
-        type: action === 'edit-color' ? 'color' : 'gradient',
-        value: structuredClone(value as NativeRecord),
+        type: action === 'edit-color' ? 'color' : action === 'edit-curve' ? 'curve' : 'gradient',
+        value:
+          typeof value === 'number'
+            ? {
+                r: ((value >> 16) & 255) / 255,
+                g: ((value >> 8) & 255) / 255,
+                b: (value & 255) / 255,
+              }
+            : structuredClone(value as NativeRecord),
+        material: typeof value === 'number',
       }
       renderInspector()
       return
     }
-    if (action === 'color-editor-cancel') {
-      colorEditor = undefined
+    if (action === 'color-editor-cancel' || action === 'curve-editor-cancel') {
+      propertyEditor = undefined
       renderInspector()
       return
     }
-    if (action === 'gradient-add' || action === 'gradient-remove') {
-      if (colorEditor?.type !== 'gradient') return
-      const part = target.dataset.editorPart === 'alpha' ? 'alpha' : 'color'
-      const keys = ((colorEditor.value[part] as NativeRecord).keys ?? []) as NativeRecord[]
-      if (action === 'gradient-remove') {
-        if (keys.length > 2) keys.splice(Number(target.dataset.editorIndex), 1)
-      } else {
-        let start = 0
-        let span = 0
-        for (let index = 0; index < keys.length; index++) {
-          const gap = Number(keys[index + 1]?.pos ?? 1) - Number(keys[index]!.pos)
-          if (gap > span) {
-            start = index
-            span = gap
-          }
-        }
-        if (span <= 0.001) return
-        const source = keys[start]!
-        const key = {
-          ...structuredClone(source),
-          pos: (Number(source.pos) + Number(keys[start + 1]?.pos ?? 1)) / 2,
-        }
-        keys.splice(start + 1, 0, key)
+    if (action === 'color-editor-apply' || action === 'curve-editor-apply') {
+      if (!propertyEditor) return
+      const editor = propertyEditor
+      try {
+        validateNative(editor.value)
+      } catch (error) {
+        flash(error instanceof Error ? error.message : 'Invalid property', true)
+        return
       }
-      renderInspector()
-      return
-    }
-    if (action === 'color-editor-apply') {
-      if (!colorEditor) return
-      const editor = colorEditor
-      colorEditor = undefined
+      propertyEditor = undefined
       if (editor.type === 'gradient') {
         for (const part of ['color', 'alpha'])
           ((editor.value[part] as NativeRecord).keys as NativeRecord[]).sort(
@@ -649,7 +586,16 @@ export function createParticleEditor(
           )
       }
       commitNativeEdit((node, json) =>
-        setNativeValue({ ...node, document: json }, editor.path, editor.value),
+        setNativeValue(
+          { ...node, document: json },
+          editor.path,
+          editor.material
+            ? Number.parseInt(
+                asHex(['r', 'g', 'b'].map((key) => Number(editor.value[key]))).slice(1),
+                16,
+              )
+            : editor.value,
+        ),
       )
       return
     }
@@ -743,25 +689,14 @@ export function createParticleEditor(
       )}</select></label><p class="hint">All registered behaviors, in execution order. Angles use native radians. Disabled modules retain their settings in Object3D userData.</p>`
   }
 
-  function renderColorStops(system: ParticleSystem): string {
-    const stops = colorStops(system)
-    if (!stops && system.behaviors.some((behavior) => behavior.type === 'ColorOverLife'))
+  function renderColorStops(system: ParticleSystem, context: PropertyContext): string {
+    const index = system.behaviors.findIndex((behavior) => behavior.type === 'ColorOverLife')
+    const behavior = system.behaviors[index] as ColorOverLife | undefined
+    if (behavior && !(behavior.color instanceof Gradient))
       return '<p class="hint">Edit this color generator in the Behaviors module.</p>'
-    if (!stops)
+    if (!behavior)
       return '<button class="btn small" type="button" data-action="enable-color">+ Add color over life</button>'
-    const colors = stops.colors
-      .map(
-        ([time, r, g, b], index) =>
-          `<div class="color-stop"><input type="number" min="0" max="1" step="0.01" value="${num(time, 3)}" aria-label="Color stop time" data-color-stop="${index}" data-color-part="time"><input type="color" value="${asHex([r, g, b])}" aria-label="Color stop color" data-color-stop="${index}" data-color-part="color"><button class="btn small danger" type="button" data-action="remove-color" data-index="${index}" title="Remove key">&times;</button></div>`,
-      )
-      .join('')
-    const alphas = stops.alphas
-      .map(
-        ([time, value], index) =>
-          `<div class="color-stop"><input type="number" min="0" max="1" step="0.01" value="${num(time, 3)}" aria-label="Alpha stop time" data-alpha-stop="${index}" data-alpha-part="time"><input type="number" min="0" max="1" step="0.01" value="${num(value, 3)}" aria-label="Alpha" data-alpha-stop="${index}" data-alpha-part="value"><button class="btn small danger" type="button" data-action="remove-alpha" data-index="${index}" title="Remove key">&times;</button></div>`,
-      )
-      .join('')
-    return `<div class="asset-heading"><span>COLOR KEYS \u{b7} T / RGB</span><button class="btn small" type="button" data-action="add-color">+ Key</button></div>${colors}<div class="asset-heading" style="margin-top:12px"><span>ALPHA KEYS \u{b7} T / VALUE</span><button class="btn small" type="button" data-action="add-alpha">+ Key</button></div>${alphas}`
+    return renderProperty(behavior.color.toJSON(), ['ps', 'behaviors', index, 'color'], context)
   }
 
   function renderInspector(): void {
@@ -774,7 +709,7 @@ export function createParticleEditor(
     const system = emitter?.system
     if (!effect || !system) {
       inspector.innerHTML =
-        '<div class="panel-tab">Inspector</div><div class="empty-list">Select or create a Quarks effect.<br><br>Open JSON to edit a local file, or import textures and create a new effect. No account or backend required.</div>'
+        '<div class="panel-tab">Inspector</div><div class="empty-list">Open a project folder or create a new effect. Browse textures in the Project panel. No account or backend required.</div>'
       return
     }
     syncEffect()
@@ -783,7 +718,6 @@ export function createParticleEditor(
     const context = propertyContext(effect.json)
     const material = materialOf(system)
     const effectRotation = rootRotation(effect)
-    const curve = sizeCurve(system)
     const modes = [
       [RenderMode.BillBoard, 'Billboard'],
       [RenderMode.StretchedBillBoard, 'Stretched Billboard'],
@@ -834,20 +768,28 @@ export function createParticleEditor(
     <section class="inspect-section"><h3>Material Properties</h3>${renderMaterial(effect.json, String(ps.material), context)}</section>
     <section class="inspect-section"><h3>Texture Properties</h3>${renderTextureProperties(effect.json, String(ps.material), context)}</section>
     <section class="inspect-section"><h3>Behaviors</h3>${renderBehaviors(node, context)}</section>
-    <section class="inspect-section"><h3>Size over lifetime</h3>${curve ? '<div class="curve-box"><svg viewBox="0 0 100 100" preserveAspectRatio="none" data-curve></svg><span class="curve-label">0 \u{2192} LIFE \u{2192} 100%</span></div><div class="curve-tools"><span>Quarks PiecewiseBezier</span><div><button class="btn" type="button" data-action="add-curve-key">+ Key</button> <button class="btn" type="button" data-action="remove-curve-key">- Key</button></div></div>' : '<button class="btn small" type="button" data-action="enable-curve">+ Add SizeOverLife</button>'}</section>
-    <section class="inspect-section"><h3>Color over lifetime</h3>${renderColorStops(system)}</section>
+    <section class="inspect-section"><h3>Size over lifetime</h3>${renderSizeCurve(system, context)}</section>
+    <section class="inspect-section"><h3>Color over lifetime</h3>${renderColorStops(system, context)}</section>
     <section class="inspect-section"><h3>Texture sheet</h3>${renderProperties(ps, ['uTileCount', 'vTileCount', 'startTileIndex', 'blendTiles'], context)}<p class="hint">Add Frame Over Life in Behaviors to animate frames.</p></section>
     <section class="inspect-section"><details class="native-json"><summary>Native Quarks JSON</summary><textarea spellcheck="false" aria-label="Native Quarks JSON" data-native-json>${esc(JSON.stringify(effect.json, null, 2))}</textarea><button class="btn small" type="button" data-action="apply-json">Apply document</button></details></section>
-    <section class="inspect-section"><button class="btn danger small" type="button" data-action="delete-effect" ${isBuiltIn(effect.id) || (savedIds.has(effect.id) && !options.deleteEffect) ? 'disabled' : ''}>Delete effect</button>${isBuiltIn(effect.id) && options.deleteEffect ? '<button class="btn small" type="button" data-action="reset-effect">Reset to project default</button>' : ''}</section>${colorEditorMarkup()}`
+    <section class="inspect-section"><button class="btn danger small" type="button" data-action="delete-effect" ${isBuiltIn(effect.id) || (savedIds.has(effect.id) && !options.deleteEffect) ? 'disabled' : ''}>Delete effect</button>${isBuiltIn(effect.id) && options.deleteEffect ? '<button class="btn small" type="button" data-action="reset-effect">Reset to project default</button>' : ''}</section>${propertyEditor ? (propertyEditor.type === 'curve' ? curveEditorMarkup() : colorEditorMarkup(propertyEditor.type)) : ''}`
     inspector.innerHTML = markup.replace(
       /<section class="inspect-section"><h3>([^<]+)<\/h3>([\s\S]*?)<\/section>/g,
       (_match, title: string, content: string) =>
         `<details class="particle-module" data-module="${esc(title)}" ${collapsedModules.has(title) ? '' : 'open'}><summary>${esc(title)}</summary><div class="module-body">${content}</div></details>`,
     )
-    if (curve) drawCurve($<SVGSVGElement>('[data-curve]'), curve)
-    if (colorEditor) {
+    if (propertyEditor) {
       const dialog = inspector.querySelector<HTMLDialogElement>('.color-editor-dialog')
-      dialog?.addEventListener('cancel', () => (colorEditor = undefined), { once: true })
+      if (dialog) {
+        if (propertyEditor.type === 'curve')
+          bindCurveEditor(
+            dialog,
+            propertyEditor.value,
+            propertyLabel(String(propertyEditor.path.at(-1))),
+          )
+        else bindColorEditor(dialog, propertyEditor.type, propertyEditor.value)
+      }
+      dialog?.addEventListener('cancel', () => (propertyEditor = undefined), { once: true })
       dialog?.showModal()
     }
   }
@@ -897,40 +839,61 @@ export function createParticleEditor(
   }
 
   async function importTextures(files: readonly File[]): Promise<void> {
+    if (!files.length || saving) return
+    saving = true
+    root.inert = true
     let imported = false
-    for (const file of files) {
+    try {
+      const directory = projectDirectory ?? (await pickProjectDirectory())
       if (destroyed) return
-      try {
-        if (textures.has(file.name))
-          throw new Error(
-            `A texture named "${file.name}" is already loaded. Rename the file to import another version.`,
-          )
-        const url = await readTextureFile(file)
+      useProjectDirectory(directory)
+      for (const file of files) {
         if (destroyed) return
-        if (textures.has(file.name))
-          throw new Error(`A texture named "${file.name}" is already loaded.`)
-        textures.set(file.name, url)
-        imported = true
-        renderTextures()
-        flash(
-          `Imported ${file.name}. Matching local image paths resolve automatically; select its thumbnail to assign it manually.`,
-        )
-      } catch (error) {
-        if (!destroyed)
-          flash(error instanceof Error ? error.message : 'Could not import texture', true)
+        try {
+          if (textures.has(file.name))
+            throw new Error(
+              `A texture named "${file.name}" is already loaded. Rename the file to import another version.`,
+            )
+          const url = await readTextureFile(file)
+          if (destroyed) return
+          const path = await textureAssetPath(file)
+          await writeFolderAssets(directory, new Map([[path, file]]))
+          if (destroyed) return
+          if (textures.has(file.name))
+            throw new Error(`A texture named "${file.name}" is already loaded.`)
+          textures.set(file.name, url)
+          imported = true
+          renderTextures()
+          flash(
+            `Imported ${file.name}. Matching local image paths resolve automatically; select its thumbnail to assign it manually.`,
+          )
+        } catch (error) {
+          if (!destroyed)
+            flash(error instanceof Error ? error.message : 'Could not import texture', true)
+        }
       }
+    } catch (error) {
+      if (!destroyed && !(error instanceof Error && error.name === 'AbortError'))
+        flash(error instanceof Error ? error.message : 'Could not copy textures to project.', true)
+    } finally {
+      saving = false
+      if (!destroyed) root.inert = false
     }
     if (!imported || destroyed) return
     syncEffect()
+    let changed = false
     let refresh = false
     for (const effect of effects) {
-      if (resolveLocalTextures(effect.json, textures) && effect.id === currentId) refresh = true
+      if (resolveLocalTextures(effect.json, textures)) {
+        changed = true
+        if (effect.id === currentId) refresh = true
+      }
     }
     if (refresh) {
       releasePreview()
       resetPreview()
-      markDirty()
     }
+    if (changed) markDirty()
     renderInspector()
   }
 
@@ -945,28 +908,6 @@ export function createParticleEditor(
     system.material = material
     markEdit()
     renderInspector()
-  }
-
-  function drawCurve(svg: SVGSVGElement, points: readonly (readonly [number, number])[]): void {
-    const d = points
-      .map(
-        ([time, value], index) =>
-          `${index === 0 ? 'M' : 'L'} ${(time * 100).toFixed(2)} ${(90 - value * 45).toFixed(2)}`,
-      )
-      .join(' ')
-    svg.innerHTML = `<path class="curve-path" d="${d}"/>${points.map(([time, value], index) => `<circle class="curve-point" cx="${(time * 100).toFixed(2)}" cy="${(90 - value * 45).toFixed(2)}" r="${index === 0 || index === points.length - 1 ? 3.2 : 4}" data-curve-index="${index}"/>`).join('')}`
-  }
-
-  function curveFromSystem(system: ParticleSystem): [number, number][] | undefined {
-    const behavior = system.behaviors.find((item) => item.type === 'SizeOverLife') as
-      SizeOverLife | undefined
-    const data = behavior?.size as unknown as
-      { functions?: Array<[{ p: number[] }, number]> } | undefined
-    const segments = data?.functions
-    if (!segments?.length) return undefined
-    const points = segments.map(([bezier, time]) => [time, bezier.p[0] ?? 1] as [number, number])
-    points.push([1, segments.at(-1)?.[0].p[3] ?? 1])
-    return points
   }
 
   function linearCurve(points: readonly (readonly [number, number])[]): PiecewiseBezier {
@@ -984,16 +925,6 @@ export function createParticleEditor(
         return [new Bezier(value, value + delta / 3, value + (delta * 2) / 3, nextValue), time]
       }),
     )
-  }
-
-  function setSizeCurve(
-    system: ParticleSystem,
-    points: readonly (readonly [number, number])[],
-  ): void {
-    const current = system.behaviors.find((item) => item.type === 'SizeOverLife') as
-      SizeOverLife | undefined
-    if (current) current.size = linearCurve(points)
-    else system.behaviors.push(new SizeOverLife(linearCurve(points)))
   }
 
   function setColorGradient(
@@ -1511,7 +1442,7 @@ export function createParticleEditor(
     const backdrop = document.createElement('dialog')
     backdrop.className = 'name-dialog'
     backdrop.setAttribute('aria-label', title)
-    backdrop.innerHTML = `<form class="modal"><h2>${esc(title)}</h2><p>Creates a native Quarks particle system. Download JSON to keep your work.</p><input name="name" value="${esc(initial)}" maxlength="80" required autocomplete="off" aria-label="Effect name"><div class="modal-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Create effect</button></div></form>`
+    backdrop.innerHTML = `<form class="modal"><h2>${esc(title)}</h2><p>Creates a native Quarks particle system. Save to a folder to keep your work.</p><input name="name" value="${esc(initial)}" maxlength="80" required autocomplete="off" aria-label="Effect name"><div class="modal-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Create effect</button></div></form>`
     root.append(backdrop)
     backdrop.showModal()
     backdrop.addEventListener('close', () => backdrop.remove(), { once: true })
@@ -1529,26 +1460,63 @@ export function createParticleEditor(
 
   async function saveCurrent(): Promise<void> {
     const effect = currentEffect()
-    if (!effect || !currentGroup || saving) return
+    if (saving || (!effect && options.saveEffect && !projectDirectory)) return
     saving = true
     try {
       syncEffect()
-      effect.json = parseQuarksDocument(serializeGroup(currentGroup))
       const revision = editRevision
-      const snapshot = structuredClone(effect)
-      if (options.saveEffect) await options.saveEffect(effect.id, exportDocument(effect.json))
-      else exportCurrent()
+      const snapshots = structuredClone(
+        options.saveEffect && !projectDirectory ? [effect!] : effects,
+      )
+      if (options.saveEffect && !projectDirectory) {
+        await options.saveEffect(effect!.id, exportDocument(effect!.json))
+        savedIds.add(effect!.id)
+      } else {
+        const directory = projectDirectory ?? (await pickProjectDirectory())
+        if (destroyed) return
+        const filenames = snapshots.map(
+          (item) => projectFiles.get(item.id) ?? `${slug(item.id)}.json`,
+        )
+        for (const filename of filenames) {
+          if (
+            ![...projectFiles.values()].includes(filename) &&
+            (await existingFile(directory, filename))
+          )
+            if (!window.confirm(`Replace "${filename}" in the selected folder?`)) return
+        }
+        const bundles = await Promise.all(
+          snapshots.map((item) => prepareFolderExport(item.json, document.baseURI)),
+        )
+        if (destroyed) return
+        // Finish all assets before replacing any document.
+        await writeFolderAssets(directory, pendingAssets)
+        for (const bundle of bundles) await writeFolderAssets(directory, bundle.files)
+        for (const [index, bundle] of bundles.entries()) {
+          const filename = filenames[index]!
+          await writeFolderExport(directory, filename, { json: bundle.json, files: new Map() })
+          deletedProjectFiles.delete(filename)
+        }
+        for (const filename of deletedProjectFiles) {
+          await directory.removeEntry(filename)
+          deletedProjectFiles.delete(filename)
+        }
+        useProjectDirectory(directory)
+        pendingAssets.clear()
+        for (const [index, item] of snapshots.entries())
+          projectFiles.set(item.id, filenames[index]!)
+      }
       if (destroyed) return
-      savedEffects.set(effect.id, snapshot)
-      if (options.saveEffect) savedIds.add(effect.id)
-      if (currentEffect() === effect && editRevision === revision) setSaved()
+      for (const snapshot of snapshots) savedEffects.set(snapshot.id, snapshot)
+      if (editRevision === revision) setSaved()
       renderEffects()
       renderInspector()
       flash(
-        `${options.saveEffect ? 'Saved native Quarks JSON' : 'Downloaded JSON (original file unchanged)'}: ${effect.id}.json`,
+        projectDirectory
+          ? `Saved project: ${projectDirectory.name}`
+          : `Saved native Quarks JSON: ${effect!.id}.json`,
       )
     } catch (error) {
-      if (!destroyed)
+      if (!destroyed && !(error instanceof Error && error.name === 'AbortError'))
         flash(error instanceof Error ? error.message : 'Could not save Quarks document', true)
     } finally {
       saving = false
@@ -1556,6 +1524,10 @@ export function createParticleEditor(
   }
 
   function discardCurrentChanges(): boolean {
+    if (projectDirectory || !options.saveEffect) {
+      syncEffect()
+      return true
+    }
     if (dirty) {
       if (!window.confirm('Discard unsaved changes?')) return false
       const saved = savedEffects.get(currentId)
@@ -1576,8 +1548,7 @@ export function createParticleEditor(
     systemIndex = 0
     undoStack.length = 0
     redoStack.length = 0
-    setSaved()
-    updateHistoryButtons()
+    if (!projectDirectory && options.saveEffect) setSaved()
     renderEffects()
     renderSystems()
     resetPreview()
@@ -1634,8 +1605,9 @@ export function createParticleEditor(
     return file
       .text()
       .then((text) => {
+        const json = parseQuarksDocument(JSON.parse(text))
         if (destroyed) return
-        importDocument(parseQuarksDocument(JSON.parse(text)), file.name.replace(/\.json$/i, ''))
+        importDocument(json, file.name.replace(/\.json$/i, ''))
       })
       .catch((error: unknown) => {
         if (!destroyed) flash(error instanceof Error ? error.message : 'Invalid Quarks JSON', true)
@@ -1644,12 +1616,7 @@ export function createParticleEditor(
 
   function importDocument(json: QuarksDocument, fallbackName: string): boolean {
     resolveLocalTextures(json, textures)
-    prepareNativeDocument(json)
-    validateSubEmitters(json)
-    // Validate runtime compatibility before replacing any in-session document.
-    const probe = new QuarksLoader().parse(structuredClone(json))
-    disposeObjects(probe)
-    for (const emitter of emitters(probe)) emitter.system.dispose()
+    validateImportedDocument(json)
     const name = String(nativeRoot(json).name || fallbackName)
     const id = slug(name)
     const imported = { id, json }
@@ -1662,7 +1629,6 @@ export function createParticleEditor(
       systemIndex = 0
       undoStack.length = 0
       redoStack.length = 0
-      updateHistoryButtons()
       markDirty()
       renderEffects()
       renderSystems()
@@ -1675,89 +1641,131 @@ export function createParticleEditor(
     return true
   }
 
-  let importingUnity = false
-  async function importUnityFile(file: File): Promise<void> {
-    if (importingUnity) {
-      flash('Finish or cancel the current Unity package import first.', true)
+  function validateImportedDocument(json: QuarksDocument): void {
+    prepareNativeDocument(json)
+    validateSubEmitters(json)
+    // Validate runtime compatibility before replacing any in-session document.
+    const probe = new QuarksLoader().parse(structuredClone(json))
+    disposeObjects(probe)
+    for (const emitter of emitters(probe)) emitter.system.dispose()
+  }
+
+  async function importEffects(file: File): Promise<void> {
+    if (saving) {
+      flash('Finish the current file operation first.', true)
       return
     }
-    importingUnity = true
-    let dialog: HTMLDialogElement | undefined
+    saving = true
+    root.inert = true
     try {
-      flash('Reading Unity package locally…')
-      const unity = await readUnityPackage(file)
-      if (destroyed) {
-        importingUnity = false
-        return
+      syncEffect()
+      const incoming: { path: string; json: QuarksDocument }[] = []
+      const assets = new Map<string, Blob>()
+      const library = new Map<string, string>()
+      const report: string[] = []
+      flash(`Reading ${file.name} locally…`)
+      if (/\.unitypackage$/i.test(file.name)) {
+        const unity = await readUnityPackage(file)
+        for (const [index, path] of unity.prefabs.entries()) {
+          if (destroyed) return
+          flash(`Converting ${index + 1}/${unity.prefabs.length}: ${path}`)
+          try {
+            const result = await unity.convertPrefab(path)
+            incoming.push({ path, json: result.json })
+            report.push(
+              `${path}\n${result.particleCount} Particle System(s).\n${result.warnings.join('\n') || 'No conversion warnings.'}`,
+            )
+          } catch (error) {
+            report.push(
+              `${path}\nSkipped: ${error instanceof Error ? error.message : 'Conversion failed.'}`,
+            )
+          }
+        }
+      } else if (/\.zip$/i.test(file.name)) {
+        const project = await readProjectZip(file)
+        incoming.push(...project.effects)
+        for (const [path, blob] of project.files) assets.set(path, blob)
+        for (const [id, url] of project.textures) library.set(id, url)
+      } else throw new Error('Choose a project .zip or .unitypackage file.')
+      if (destroyed) return
+      const staged: EffectFile[] = []
+      const ids = new Set(effects.map((effect) => effect.id))
+      for (const { path, json: source } of incoming) {
+        if (destroyed) return
+        try {
+          const json = structuredClone(source)
+          validateImportedDocument(json)
+          const bundle = await prepareFolderExport(json, document.baseURI)
+          for (const blob of bundle.files.values()) await addTextureAsset(assets, blob)
+          const name = String(
+            nativeRoot(json).name ||
+              path
+                .split('/')
+                .at(-1)!
+                .replace(/\.[^.]+$/, ''),
+          )
+          const base = slug(name)
+          let id = base
+          let suffix = 2
+          while (ids.has(id)) id = `${base}-${suffix++}`
+          ids.add(id)
+          if (id !== base) {
+            nativeRoot(json).name = `${name} (${suffix - 1})`
+            report.push(`${path}\nRenamed to ${id} to keep the existing effect.`)
+          }
+          staged.push({ id, json })
+          report.push(`${path}\nImported as ${id}.`)
+        } catch (error) {
+          report.push(
+            `${path}\nSkipped: ${error instanceof Error ? error.message : 'Invalid effect.'}`,
+          )
+        }
       }
-      dialog = document.createElement('dialog')
-      dialog.className = 'name-dialog'
-      dialog.setAttribute('aria-label', 'Import Unity prefab')
-      dialog.innerHTML = `<form class="modal"><h2>Import Unity prefab</h2><p>Choose one prefab to convert. Reopen the package to import another. Export from Unity with Include dependencies enabled.</p><label class="field"><span>Prefab (${unity.prefabs.length})</span><select name="prefab" aria-label="Unity prefab">${unity.prefabs.map((path, index) => `<option value="${index}">${esc(path)}</option>`).join('')}</select></label><p>Shuriken text prefabs only. Unsupported features are listed in the import report; Unity shaders cannot be reproduced exactly.</p><p role="status" aria-live="polite" data-unity-status></p><div class="modal-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Convert &amp; import</button></div></form>`
-      const chooser = dialog
-      const close = () => {
-        chooser.remove()
-        importingUnity = false
+      if (destroyed) return
+      if (staged.length) {
+        for (const [path, blob] of assets) {
+          const id = path.split('/').at(-1)!
+          if (!library.has(id))
+            library.set(id, await readTextureFile(new File([blob], id, { type: blob.type })))
+        }
+        if (destroyed) return
+        if (projectDirectory) await writeFolderAssets(projectDirectory, assets)
+        else for (const blob of assets.values()) await addTextureAsset(pendingAssets, blob)
+        if (destroyed) return
+        releasePreview()
+        effects.push(...staged)
+        for (const [id, url] of library) {
+          let key = id
+          let suffix = 2
+          while (textures.has(key) && textures.get(key) !== url) key = `${id} (${suffix++})`
+          textures.set(key, url)
+        }
+        currentId = staged[0]!.id
+        systemIndex = 0
+        undoStack.length = 0
+        redoStack.length = 0
+        markDirty()
+        renderEffects()
+        renderTextures()
+        renderSystems()
+        resetPreview()
+        renderInspector()
       }
-      chooser.addEventListener(
-        'cancel',
-        (event) => {
-          event.preventDefault()
-          close()
-        },
-        { signal: events.signal },
+      $('[data-unity-report-text]').textContent =
+        `${file.name}\nImported ${staged.length} effect(s).\n\n${report.join('\n\n')}`
+      const details = $<HTMLDetailsElement>('[data-unity-report]')
+      details.hidden = false
+      details.open = true
+      flash(
+        `Imported ${staged.length} effect(s). Check the Import report, then Save project.`,
+        !staged.length,
       )
-      chooser
-        .querySelector('[data-cancel]')!
-        .addEventListener('click', close, { signal: events.signal })
-      chooser.querySelector('form')!.addEventListener(
-        'submit',
-        (event) => {
-          event.preventDefault()
-          const submit = chooser.querySelector<HTMLButtonElement>('[type="submit"]')!
-          if (submit.disabled) return
-          const path =
-            unity.prefabs[Number(chooser.querySelector<HTMLSelectElement>('select')!.value)]
-          if (!path) return
-          submit.disabled = true
-          const status = chooser.querySelector<HTMLElement>('[data-unity-status]')!
-          status.textContent = 'Converting prefab and embedding textures…'
-          void unity
-            .convertPrefab(path)
-            .then((result) => {
-              if (destroyed || !chooser.isConnected) return
-              if (!importDocument(result.json, path)) {
-                status.textContent = 'Import cancelled. Your current effect was kept.'
-                return
-              }
-              const report = $<HTMLDetailsElement>('[data-unity-report]')
-              $('[data-unity-report-text]').textContent =
-                `${path}\n${result.particleCount} Particle System(s) converted.\n\n${result.warnings.join('\n') || 'No conversion warnings.'}`
-              report.hidden = false
-              report.open = true
-              close()
-              flash(
-                `Imported ${result.particleCount} Particle System(s). Check the Unity import report, then Download JSON.`,
-              )
-            })
-            .catch((error: unknown) => {
-              if (!destroyed && chooser.isConnected)
-                status.textContent =
-                  error instanceof Error ? error.message : 'Could not convert Unity prefab.'
-            })
-            .finally(() => {
-              submit.disabled = false
-            })
-        },
-        { signal: events.signal },
-      )
-      root.append(chooser)
-      chooser.showModal()
     } catch (error) {
-      dialog?.remove()
-      importingUnity = false
       if (!destroyed)
-        flash(error instanceof Error ? error.message : 'Could not import Unity package.', true)
+        flash(error instanceof Error ? error.message : 'Could not import effects.', true)
+    } finally {
+      saving = false
+      if (!destroyed) root.inert = false
     }
   }
 
@@ -1772,22 +1780,112 @@ export function createParticleEditor(
     prune(root)
     if (root.visible === false || !emitterNodes(root).length)
       throw new Error('Enable at least one Particle System before exporting.')
+    const assetKeys = [
+      'geometries',
+      'materials',
+      'textures',
+      'images',
+      'shapes',
+      'skeletons',
+      'animations',
+    ]
+    const assets = new Map<string, NativeRecord>()
+    for (const key of assetKeys)
+      for (const asset of (json[key] ?? []) as NativeRecord[]) assets.set(String(asset.uuid), asset)
+    const used = new Set<string>()
+    const collect = (value: unknown): void => {
+      if (typeof value === 'string' && assets.has(value) && !used.has(value)) {
+        used.add(value)
+        collect(assets.get(value))
+      } else if (value && typeof value === 'object') Object.values(value).forEach(collect)
+    }
+    collect(root)
+    for (const key of assetKeys)
+      if (Array.isArray(json[key]))
+        json[key] = (json[key] as NativeRecord[]).filter((asset) => used.has(String(asset.uuid)))
     return parseQuarksDocument(json)
   }
 
-  function exportCurrent(): void {
-    const effect = currentEffect()
-    if (!effect || !currentGroup) return
-    syncEffect()
-    const json = exportDocument(effect.json)
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' }),
-    )
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${effect.id}.json`
-    link.click()
-    URL.revokeObjectURL(url)
+  function useProjectDirectory(directory: FileSystemDirectoryHandle): void {
+    projectDirectory = directory
+    $('[data-project-folder]').textContent = directory.name
+  }
+
+  async function pickProjectDirectory(): Promise<FileSystemDirectoryHandle> {
+    const picker = (
+      window as Window & {
+        showDirectoryPicker?: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
+      }
+    ).showDirectoryPicker
+    if (!picker) throw new Error('Project folders require Chrome or Edge on HTTPS or localhost.')
+    return picker.call(window, { mode: 'readwrite' })
+  }
+
+  async function openProject(): Promise<void> {
+    if (saving) return
+    if (dirty && !window.confirm('Discard unsaved changes and open another project?')) return
+    saving = true
+    root.inert = true
+    try {
+      const directory = await pickProjectDirectory()
+      const loaded: EffectFile[] = []
+      const filenames = new Map<string, string>()
+      for await (const [name, handle] of directory.entries()) {
+        if (handle.kind !== 'file' || !/\.json$/i.test(name)) continue
+        const file = await handle.getFile()
+        if (file.size > 64 * 1024 * 1024) throw new Error('JSON files must not exceed 64 MB.')
+        const json = parseQuarksDocument(JSON.parse(await file.text()))
+        await resolveFolderTextures(json, directory)
+        validateImportedDocument(json)
+        const id = slug(name.replace(/\.json$/i, ''))
+        if (filenames.has(id)) throw new Error(`Duplicate effect id in project: ${id}`)
+        filenames.set(id, name)
+        loaded.push({ id, json })
+      }
+      const library = new Map<string, string>()
+      try {
+        const assets = await directory.getDirectoryHandle('assets')
+        const folder = await assets.getDirectoryHandle('textures')
+        for await (const [name, handle] of folder.entries()) {
+          if (handle.kind === 'file' && /\.(png|jpe?g|webp|gif)$/i.test(name))
+            library.set(name, await readTextureFile(await handle.getFile()))
+        }
+      } catch (error) {
+        if (!(error instanceof Error && error.name === 'NotFoundError')) throw error
+      }
+      if (destroyed) return
+      releasePreview()
+      effects = loaded
+      textures.clear()
+      for (const [name, url] of library) textures.set(name, url)
+      defaults.clear()
+      savedIds.clear()
+      savedEffects.clear()
+      projectFiles.clear()
+      deletedProjectFiles.clear()
+      pendingAssets.clear()
+      for (const item of loaded) savedEffects.set(item.id, structuredClone(item))
+      for (const [id, name] of filenames) projectFiles.set(id, name)
+      useProjectDirectory(directory)
+      currentId = loaded[0]?.id ?? ''
+      systemIndex = 0
+      undoStack.length = 0
+      redoStack.length = 0
+      setSaved()
+      $('[data-unity-report]').setAttribute('hidden', '')
+      renderEffects()
+      renderTextures()
+      renderSystems()
+      resetPreview()
+      renderInspector()
+      flash(`Opened project: ${directory.name}`)
+    } catch (error) {
+      if (!destroyed && !(error instanceof Error && error.name === 'AbortError'))
+        flash(error instanceof Error ? error.message : 'Could not open project.', true)
+    } finally {
+      saving = false
+      if (!destroyed) root.inert = false
+    }
   }
 
   root.addEventListener(
@@ -1826,14 +1924,6 @@ export function createParticleEditor(
         assignTexture(target.dataset.texture)
         return
       }
-      if (action === 'undo') {
-        travelHistory(undoStack, redoStack)
-        return
-      }
-      if (action === 'redo') {
-        travelHistory(redoStack, undoStack)
-        return
-      }
       if (target.dataset.effect) {
         selectEffect(target.dataset.effect)
         return
@@ -1845,24 +1935,40 @@ export function createParticleEditor(
         return
       }
       if (action === 'save') void saveCurrent()
-      else if (action === 'import') {
-        const input = $<HTMLInputElement>('[data-file-input]')
-        input.value = ''
-        input.click()
-      } else if (action === 'import-unity') {
-        const input = $<HTMLInputElement>('[data-unity-input]')
+      else if (action === 'open-project') void openProject()
+      else if (action === 'import-effects') {
+        if (saving) return
+        const input = $<HTMLInputElement>('[data-effects-input]')
         input.value = ''
         input.click()
       } else if (action === 'import-texture') {
-        const input = $<HTMLInputElement>('[data-texture-input]')
-        input.value = ''
-        input.click()
-      } else if (action === 'export') {
-        try {
-          exportCurrent()
-        } catch (error) {
-          flash(error instanceof Error ? error.message : 'Could not export JSON', true)
+        if (saving) return
+        if (projectDirectory) {
+          const input = $<HTMLInputElement>('[data-texture-input]')
+          input.value = ''
+          input.click()
+          return
         }
+        saving = true
+        root.inert = true
+        void pickProjectDirectory()
+          .then((directory) => {
+            if (destroyed) return
+            useProjectDirectory(directory)
+            // Directory selection consumes activation; the file picker needs a fresh click.
+            flash('Project folder selected. Click Browse again to choose textures.')
+          })
+          .catch((error: unknown) => {
+            if (!destroyed && !(error instanceof Error && error.name === 'AbortError'))
+              flash(
+                error instanceof Error ? error.message : 'Could not select project folder.',
+                true,
+              )
+          })
+          .finally(() => {
+            saving = false
+            if (!destroyed) root.inert = false
+          })
       } else if (action === 'new')
         openNameModal('Create Quarks effect', 'New Effect', (name) => name && addNewEffect(name))
       else if (action === 'duplicate') {
@@ -1953,26 +2059,18 @@ export function createParticleEditor(
         const system = currentEmitter()?.system
         if (system) {
           recordHistory()
-          setSizeCurve(system, [
-            [0, 0.2],
-            [0.4, 1],
-            [1, 0],
-          ])
+          system.behaviors.push(
+            new SizeOverLife(
+              linearCurve([
+                [0, 0.2],
+                [0.4, 1],
+                [1, 0],
+              ]),
+            ),
+          )
           markEdit()
           renderInspector()
         }
-      } else if (action === 'add-curve-key' || action === 'remove-curve-key') {
-        const system = currentEmitter()?.system
-        const points = system && curveFromSystem(system)
-        if (!system || !points) return
-        recordHistory()
-        if (action === 'add-curve-key') {
-          points.push([0.5, 0.8])
-          points.sort((a, b) => a[0] - b[0])
-        } else if (points.length > 2) points.splice(points.length - 2, 1)
-        setSizeCurve(system, points)
-        markEdit()
-        renderInspector()
       } else if (action === 'enable-color') {
         const system = currentEmitter()?.system
         if (!system) return
@@ -2004,11 +2102,7 @@ export function createParticleEditor(
         if (!effect) return
         try {
           const json = parseQuarksDocument(JSON.parse(input.value))
-          prepareNativeDocument(json)
-          validateSubEmitters(json)
-          const probe = new QuarksLoader().parse(structuredClone(json))
-          disposeObjects(probe)
-          for (const emitter of emitters(probe)) emitter.system.dispose()
+          validateImportedDocument(json)
           recordHistory()
           releasePreview()
           effect.json = json
@@ -2021,26 +2115,6 @@ export function createParticleEditor(
         } catch (error) {
           flash(error instanceof Error ? error.message : 'Invalid Quarks JSON', true)
         }
-      } else if (
-        action === 'add-color' ||
-        action === 'remove-color' ||
-        action === 'add-alpha' ||
-        action === 'remove-alpha'
-      ) {
-        const system = currentEmitter()?.system
-        const stops = system && colorStops(system)
-        if (!system || !stops) return
-        recordHistory()
-        if (action === 'add-color') stops.colors.push([0.5, 1, 1, 1])
-        else if (action === 'remove-color' && stops.colors.length > 2)
-          stops.colors.splice(Number(target.dataset.index), 1)
-        else if (action === 'add-alpha') stops.alphas.push([0.5, 1])
-        else if (stops.alphas.length > 2) stops.alphas.splice(Number(target.dataset.index), 1)
-        stops.colors.sort((a, b) => a[0] - b[0])
-        stops.alphas.sort((a, b) => a[0] - b[0])
-        setColorGradient(system, stops.colors, stops.alphas)
-        markEdit()
-        renderInspector()
       } else if (action === 'delete-effect') {
         const effect = currentEffect()
         if (!effect || isBuiltIn(effect.id) || !window.confirm(`Delete "${displayName(effect)}"?`))
@@ -2086,11 +2160,16 @@ export function createParticleEditor(
     saving = true
     root.inert = true
     try {
-      if (savedIds.has(effect.id)) {
+      if (savedIds.has(effect.id) && !projectDirectory) {
         if (!options.deleteEffect) throw new Error('This project has no delete handler')
         await options.deleteEffect(effect.id)
       }
       if (destroyed) return
+      if (projectDirectory) {
+        const filename = projectFiles.get(effect.id)
+        if (filename) deletedProjectFiles.add(filename)
+        projectFiles.delete(effect.id)
+      }
       effects = effects.filter((item) => item.id !== effect.id)
       savedIds.delete(effect.id)
       savedEffects.delete(effect.id)
@@ -2100,10 +2179,10 @@ export function createParticleEditor(
         systemIndex = 0
         undoStack.length = 0
         redoStack.length = 0
-        setSaved()
-        updateHistoryButtons()
+        if (!projectDirectory && options.saveEffect) setSaved()
         resetPreview()
       }
+      if (projectDirectory || !options.saveEffect) markDirty()
       renderEffects()
       renderSystems()
       renderInspector()
@@ -2115,124 +2194,13 @@ export function createParticleEditor(
     }
   }
 
-  function editCurvePointer(event: PointerEvent, svg: SVGSVGElement): void {
-    const point = (event.target as HTMLElement).closest<SVGCircleElement>('[data-curve-index]')
-    const system = currentEmitter()?.system
-    const points = system && curveFromSystem(system)
-    if (!point || !system || !points) return
-    event.preventDefault()
-    recordHistory()
-    svg.setPointerCapture(event.pointerId)
-    const index = Number(point.dataset.curveIndex)
-    const move = (pointer: PointerEvent) => {
-      const rect = svg.getBoundingClientRect()
-      const time = Math.max(0, Math.min(1, (pointer.clientX - rect.left) / rect.width))
-      const value = Math.max(0, Math.min(2, 2 * (1 - (pointer.clientY - rect.top) / rect.height)))
-      const next = curveFromSystem(system)
-      if (!next?.[index]) return
-      next[index]![0] =
-        index === 0
-          ? 0
-          : index === next.length - 1
-            ? 1
-            : Math.max(next[index - 1]![0] + 0.015, Math.min(next[index + 1]![0] - 0.015, time))
-      next[index]![1] = value
-      setSizeCurve(system, next)
-      drawCurve(svg, next)
-      markEdit()
-    }
-    const end = () => {
-      svg.removeEventListener('pointermove', move)
-      svg.removeEventListener('pointerup', end)
-      svg.removeEventListener('pointercancel', end)
-    }
-    svg.addEventListener('pointermove', move, { signal: events.signal })
-    svg.addEventListener('pointerup', end, { signal: events.signal })
-    svg.addEventListener('pointercancel', end, { signal: events.signal })
-  }
-
   root.addEventListener(
     'input',
     (event) => {
       const target = event.target
       if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) {
-        if (
-          target instanceof HTMLInputElement &&
-          target.dataset.editorColor &&
-          colorEditor?.type === 'color'
-        ) {
-          const color = colorEditor.value
-          if (target.dataset.editorColor === 'hex') {
-            const rgb = fromHex(target.value)
-            ;['r', 'g', 'b'].forEach((key, index) => (color[key] = rgb[index]))
-          } else if (target.dataset.editorColor === 'alpha') {
-            color.a = Math.max(0, Math.min(255, Number(target.value))) / 255
-          } else {
-            color[target.dataset.editorColor] =
-              Math.max(0, Math.min(255, Number(target.value))) / 255
-          }
-          const dialog = target.closest('dialog')!
-          dialog.querySelector<HTMLInputElement>('[data-editor-color="hex"]')!.value =
-            editorColorHex(color)
-          for (const channel of ['r', 'g', 'b'])
-            dialog.querySelector<HTMLInputElement>(`[data-editor-color="${channel}"]`)!.value =
-              String(Math.round(Number(color[channel]) * 255))
-          for (const alpha of dialog.querySelectorAll<HTMLInputElement>(
-            '[data-editor-color="alpha"]',
-          ))
-            alpha.value = String(Math.round(Number(color.a) * 255))
-          dialog
-            .querySelector<HTMLElement>('.color-editor-sample')!
-            .style.setProperty('--swatch', editorRgba(color))
-        } else if (
-          target instanceof HTMLInputElement &&
-          target.dataset.editorStop &&
-          colorEditor?.type === 'gradient'
-        ) {
-          const keys = ((colorEditor.value[target.dataset.editorStop] as NativeRecord).keys ??
-            []) as NativeRecord[]
-          const key = keys[Number(target.dataset.editorIndex)]
-          if (!key) return
-          if (target.dataset.editorField === 'color') {
-            const rgb = fromHex(target.value)
-            const value = key.value as NativeRecord
-            ;['r', 'g', 'b'].forEach((channel, index) => (value[channel] = rgb[index]))
-          } else if (target.dataset.editorField === 'value')
-            key.value = Math.max(0, Math.min(1, Number(target.value)))
-          else {
-            const index = Number(target.dataset.editorIndex)
-            const previous = Number(keys[index - 1]?.pos ?? 0)
-            const next = Number(keys[index + 1]?.pos ?? 1)
-            key.pos = Math.max(
-              previous + (index ? 0.001 : 0),
-              Math.min(next - (index < keys.length - 1 ? 0.001 : 0), Number(target.value)),
-            )
-            target.value = String(key.pos)
-          }
-          const preview = target
-            .closest('dialog')
-            ?.querySelector<HTMLElement>('.gradient-editor-preview')
-          if (preview) preview.style.background = editorGradientCss(colorEditor.value)
-        } else if (target.dataset.bind) writeBound(target)
-        else if (target instanceof HTMLInputElement && target.dataset.colorStop !== undefined) {
-          const system = currentEmitter()?.system
-          const stops = system && colorStops(system)
-          const stop = stops?.colors[Number(target.dataset.colorStop)]
-          if (!system || !stops || !stop) return
-          if (target.dataset.colorPart === 'time') stop[0] = Number(target.value)
-          else stop.splice(1, 3, ...fromHex(target.value))
-          setColorGradient(system, stops.colors, stops.alphas)
-          markEdit()
-        } else if (target instanceof HTMLInputElement && target.dataset.alphaStop !== undefined) {
-          const system = currentEmitter()?.system
-          const stops = system && colorStops(system)
-          const stop = stops?.alphas[Number(target.dataset.alphaStop)]
-          if (!system || !stops || !stop) return
-          if (target.dataset.alphaPart === 'time') stop[0] = Number(target.value)
-          else stop[1] = Number(target.value)
-          setColorGradient(system, stops.colors, stops.alphas)
-          markEdit()
-        } else if (target.matches('[data-timeline]')) {
+        if (target.dataset.bind) writeBound(target)
+        else if (target.matches('[data-timeline]')) {
           playing = false
           const next = (Number(target.value) / 1000) * previewDuration
           resetPreview()
@@ -2281,44 +2249,10 @@ export function createParticleEditor(
     'focusin',
     (event) => {
       const target = event.target as HTMLElement
-      if (
-        target.dataset.bind ||
-        target.dataset.colorStop !== undefined ||
-        target.dataset.alphaStop !== undefined
-      )
-        recordHistory()
+      if (target.dataset.bind) recordHistory()
     },
     { signal: events.signal },
   )
-  root.addEventListener(
-    'pointerdown',
-    (event) => {
-      const target = event.target as HTMLElement
-      if (target.closest('[data-curve-index]')) {
-        const svg = target.closest<SVGSVGElement>('[data-curve]')
-        if (svg) editCurvePointer(event as PointerEvent, svg)
-      }
-    },
-    { signal: events.signal },
-  )
-  $<HTMLInputElement>('[data-file-input]').addEventListener(
-    'change',
-    (event) => {
-      const file = (event.target as HTMLInputElement).files?.[0]
-      if (file) void importFile(file)
-    },
-    { signal: events.signal },
-  )
-
-  $<HTMLInputElement>('[data-unity-input]').addEventListener(
-    'change',
-    (event) => {
-      const file = (event.target as HTMLInputElement).files?.[0]
-      if (file) void importUnityFile(file)
-    },
-    { signal: events.signal },
-  )
-
   $<HTMLInputElement>('[data-geometry-input]').addEventListener(
     'change',
     (event) => {
@@ -2350,6 +2284,15 @@ export function createParticleEditor(
     { signal: events.signal },
   )
 
+  $<HTMLInputElement>('[data-effects-input]').addEventListener(
+    'change',
+    (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0]
+      if (file) void importEffects(file)
+    },
+    { signal: events.signal },
+  )
+
   $<HTMLInputElement>('[data-texture-input]').addEventListener(
     'change',
     (event) => {
@@ -2371,11 +2314,11 @@ export function createParticleEditor(
     (event) => {
       event.preventDefault()
       const files = Array.from(event.dataTransfer?.files ?? [])
-      const packages = files.filter((file) => /\.unitypackage$/i.test(file.name))
+      const packages = files.filter((file) => /\.(unitypackage|zip)$/i.test(file.name))
       if (packages.length) {
         if (files.length !== 1)
-          flash('Drop one .unitypackage at a time, without other files.', true)
-        else void importUnityFile(packages[0]!)
+          flash('Drop one project ZIP or UnityPackage at a time, without other files.', true)
+        else void importEffects(packages[0]!)
         return
       }
       const documents = files.filter((file) => /\.json$/i.test(file.name))
@@ -2405,6 +2348,7 @@ export function createParticleEditor(
   root.addEventListener(
     'keydown',
     (event) => {
+      if (propertyEditor) return
       const typing =
         event.target instanceof HTMLInputElement ||
         event.target instanceof HTMLTextAreaElement ||
@@ -2412,7 +2356,7 @@ export function createParticleEditor(
       const key = event.key.toLowerCase()
       if ((event.metaKey || event.ctrlKey) && key === 'o') {
         event.preventDefault()
-        $<HTMLButtonElement>('[data-action="import"]').click()
+        void openProject()
       } else if ((event.metaKey || event.ctrlKey) && key === 's') {
         event.preventDefault()
         void saveCurrent()

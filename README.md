@@ -18,42 +18,51 @@ npm run dev
 
 Open the URL printed by Vite:
 
-1. Click **Open JSON** to browse a native Quarks effect, **Import Unity Package**
-   to convert a `.unitypackage`, or **New effect** to create one. Standalone Unity
-   `.prefab`, `.unity`, and `.vfx` files are not accepted.
-2. Click **Import Textures** to select PNG, JPEG, WebP, or GIF files. Select a
-   thumbnail in **Project** to assign it to the selected particle system.
-3. To resolve a JSON's relative image paths, open JSON and import textures in
-   either order; matching is by exact filename including extension. The preview
-   refreshes when matching textures arrive. Alternatively, drop one
-   JSON and its textures together into the editor. Remote URLs are not rewritten.
+1. Click **Open project** (Ctrl/Cmd+O) and choose your project folder. All native
+   Quarks JSON files at its root open together, with folder-relative textures.
+   An empty folder works for a new project; use **New effect** to add effects.
+2. In **Project → Textures**, click **Browse** to select PNG, JPEG, WebP, or GIF
+   files. They are copied immediately into the project’s `assets/textures/` folder,
+   even before assignment or saving. If no folder is selected, choose one first,
+   then click **Browse** again to choose textures.
+   Select a thumbnail to assign the texture to the selected particle system.
+3. In **Effects**, click **Import** to add another project's `.zip` or all effects
+   from a `.unitypackage`. You can also drop an archive, one JSON, or textures into the editor.
+   Dropped JSON paths match browsed textures by exact filename including extension;
+   project folder paths resolve exactly, without basename matching.
 4. Edit modules in **Inspector**, then use Play/Pause, Restart, Step, or the
    preview scrubber to check the result.
-5. **Download JSON** (Ctrl/Cmd+S) downloads a new file with assigned local textures
-   embedded. Reopen it later to continue. The original file is never overwritten.
+5. **Save project** (Ctrl/Cmd+S) saves all effects into the selected folder without
+   asking again. With no folder selected, the first save asks for one. Effect JSON
+   goes at its root; image files go in `assets/textures/`. Undo/Redo use
+   Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y), without toolbar buttons.
 
-Files stay in the current browser session; reload loses the session. Download
-each changed effect before leaving. No data is uploaded by the editor itself;
+Unsaved edits stay in the current browser session; reload loses them. Save the
+project before leaving, then reopen its folder after reloading. Switching effects
+within an open project preserves pending edits. No data is uploaded by the editor itself;
 JSON with external texture URLs can make network requests to those URLs.
 Duplicate texture filenames are rejected instead of silently replacing assets.
 Raster files are limited to 16 MB / 8192 pixels per dimension; JSON to 64 MB.
 
 Use the checkboxes in **Hierarchy** to toggle individual Particle Systems in the
-preview. Unchecked systems are omitted from **Export JSON**, **Download JSON**,
-and **Save to Project**, but remain in the editor so you can re-enable them or
-undo the change. Enable at least one system to export; an exported file cannot
-restore the omitted systems.
+preview. **Save project** preserves unchecked systems and their native visibility
+flags so reopening the project does not lose editable data. The host `saveEffect`
+callback retains its existing enabled-systems-only contract and requires at least
+one enabled system.
 
 ### Import Unity particle prefabs
 
 In Unity, set **Asset Serialization → Force Text**, then export your prefab as a
-`.unitypackage` with **Include dependencies** enabled. Click **Import Unity
-Package** (or drop the package), choose a prefab, and click **Convert & import**.
-Each import converts one prefab, including all its Shuriken Particle Systems and
-inactive children. Reopen the package to choose another prefab. Inspect the
-persistent **Unity import report**, preview/edit the result, then **Download JSON**.
-Supported raster textures are embedded in the native JSON; no Unity installation,
-server, or upload is needed during conversion.
+`.unitypackage` with **Include dependencies** enabled. Click **Effects → Import**
+and select the package, or drop it into the editor. Every prefab is processed in
+one operation, including its Shuriken Particle Systems and inactive children.
+Prefabs without particles or with unsupported data are skipped with reasons;
+valid effects still import. Inspect the persistent **Import report**, preview/edit
+the results, then **Save project**. Name collisions get numeric suffixes instead
+of replacing existing effects or discarding their edits.
+Supported raster textures are held locally during editing and written as separate
+files on folder export; no Unity installation, server, or upload is needed during
+conversion.
 
 The importer maps hierarchy/transforms, main start values, emission rates/bursts,
 common shapes, size/color/Z-rotation over lifetime, grid texture-sheet animation,
@@ -69,12 +78,32 @@ scripts, animation controllers, mesh assets, trails, physics and sub-emitter lin
 are not converted. TGA/PSD/EXR and other non-browser image formats need conversion
 to PNG before export. See [the exact scope](docs/unity-import.md).
 
+### Import another project ZIP
+
+Zip the project folder containing root-level effect JSON and its texture files.
+**Effects → Import** accepts JSON at the archive root or within one enclosing
+folder. Texture paths resolve exactly relative to that project root. All effects
+are added to the current project; existing effects are kept, with numeric suffixes
+for duplicate names. The source ZIP is never modified.
+
+Referenced images and unused raster textures join the texture library, sharing
+short content-hashed files. If a project folder is already selected, imported
+images are copied there immediately; otherwise they are written on **Save project**.
+Effect JSON is written only on save. Missing or corrupt images and invalid JSON
+abort ZIP decoding without replacing the current session. Native runtime-incompatible
+effects are skipped with a reason in **Import report**.
+
+ZIP import accepts standard stored/Deflate archives up to 128 MB compressed,
+512 MB expanded, 64 MB per entry, and 40,000 entries. Normal texture/JSON limits
+also apply. Encrypted, multi-volume, and ZIP64 archives are not supported. Archive
+paths containing traversal or duplicate entries are rejected, not extracted.
+
 ### Reference effects
 
 The optional [demo folder](demo/README.md) contains Fire, Lightning, and Poison
 effects from Bug Battle 3D, with separate texture files (not embedded in JSON).
-Open a demo JSON and import `demo/textures/*.png` in either order, or drop one
-JSON and its texture files together. Demos are never loaded automatically.
+Copy that folder and use **Open project**, or drop one JSON and its texture files
+together. Demos are never loaded automatically.
 **Demo textures are not MIT-licensed; see the [asset notice](demo/ASSETS.md).**
 
 ### Familiar particle-authoring layout
@@ -85,17 +114,24 @@ JSON and its texture files together. Demos are never loaded automatically.
 - **Inspector** uses compact, collapsible **Transform**, **Main**, **Emission**,
   **Shape**, **Renderer**, **Size over Lifetime**, **Color over Lifetime**, and
   **Texture Sheet Animation** sections. Foldout state survives inspector updates.
+- **Color and gradient pickers** offer a hue wheel, saturation/brightness square,
+  RGBA sliders, hex input, transparency previews, and draggable color/alpha keys.
+  Changes stay in a draft until **Apply**; **Cancel** or Escape discards them.
+- **Curve editor** opens from any curve preview: drag keys and tangent handles,
+  double-click to add keys, choose presets or Smooth/Linear/Flat tangents, and
+  zoom vertically with the wheel (Alt-drag to pan, **Fit** to reset). **Apply**
+  commits one undoable edit; **Cancel** or Escape leaves the curve unchanged.
 - Space: play/pause; R: restart; F: frame; Ctrl/Cmd+O: open;
-  Ctrl/Cmd+S: download/save; Ctrl/Cmd+Z / Shift+Z: undo/redo.
+  Ctrl/Cmd+S: save; Ctrl/Cmd+Z / Shift+Z: undo/redo.
 
 This is **Unity-inspired, not a Unity clone or compatibility runtime**. It edits
 native Quarks behavior; Unity package conversion is best-effort and does not add
 Unity-only modules or copied Unity artwork. The inspector exposes all **19 registered behaviors**, **9 registered
 shapes**, **12 generator modes**, and **6 render modes** in `three.quarks` 0.17.1.
-There are forms for native cubic curve controls, gradient/color/alpha keys,
+There are visual editors for native cubic curves and gradient/color/alpha keys, plus forms for
 multiple bursts, vectors, rotations, renderer settings, materials, and textures.
-The two quick lifetime editors are optional visual shortcuts; the native forms
-in **Behaviors** preserve the complete generators, including cubic control values.
+Lifetime sections and **Behaviors** share the same curve and gradient editors,
+preserving the complete generators, including cubic control values.
 
 See the [Quarks support matrix](docs/quarks-support.md) for the exact scope and
 upstream limitations. This is complete authoring of the stock loader's registered
@@ -133,9 +169,10 @@ editor.destroy()
 Give the container an explicit height, for example `height: 100vh`. Styles are
 included inside a Shadow DOM; no global stylesheet import is needed. Multiple
 editors can coexist. Keyboard shortcuts apply only inside the focused editor.
-Create, open, import textures, and download all work without callbacks. Save
-downloads JSON when `saveEffect` is omitted. With a callback it saves through the
-host; **Export JSON** still downloads an independent copy.
+Create, open, browse textures, and save project all work without callbacks. With
+`saveEffect`, saving uses the host’s existing native JSON contract until a local
+project folder is selected. Opening a folder replaces the host-provided library
+for this session; subsequent saves target that folder, not the host callback.
 
 ## Browse your project's data
 
@@ -175,8 +212,8 @@ try {
 Effect and texture ids must be unique within each library. Documents and textures
 are validated before initialization. Host-owned input objects are not mutated.
 Libraries are snapshots loaded on mount; remount to browse externally changed
-data. The package never scans folders or assumes API routes, a bundler, or a
-project directory structure. The host can implement callbacks with its dev server,
+data. The package only scans a local folder after explicit user selection and
+never assumes API routes or a bundler. The host can implement callbacks with its dev server,
 backend, IndexedDB, or an explicitly user-authorized filesystem API.
 
 `json` is a Three.js `Group` or `Scene` containing at least one Quarks
@@ -187,11 +224,66 @@ ships no defaults. User-created effects start with one editable emitter only
 after clicking **New effect**.
 
 Texture URLs may be relative, root-relative, HTTP(S), or image data URLs. Relative
-URLs resolve against the host page and project-library URLs are preserved on
-export. Cross-origin images need CORS headers, including for JSON serialization.
+URLs resolve against the host page during editing. Folder export copies images
+from these URLs into the output; cross-origin images need CORS headers. The
+`saveEffect` callback retains the original native URL/embedded-image contract.
 Files without a texture use an untextured material, not a bundled image. The
 preview has its own Three.js scene; exported JSON can be loaded into a game's
 scene with `QuarksLoader` and `BatchedRenderer`.
+
+### Project layout and game loading
+
+Project folders require Chrome/Edge with the File System Access API on HTTPS or
+localhost. Cancelling the picker or a failed write does not mark edits as saved.
+Opened project JSON files are updated in place; overwriting a file not already
+owned by the session requires confirmation. All images are written before JSON.
+Each file write is atomic, but saving several JSON files is not one transaction:
+a failure can leave some documents updated, with the project still marked unsaved.
+
+```text
+effects/
+  fire.json
+  smoke.json
+  assets/textures/
+    2cf24dba5fb0a30e.png
+    42b7c9ea8a14d250.webp
+```
+
+Image URLs in JSON are relative to that JSON, e.g.
+`assets/textures/2cf24dba5fb0a30e.png`. Names use the first 16 hex characters of
+SHA-256 instead of 64; matching names are checked byte-for-byte, and conflicting
+content aborts the operation without overwriting the asset. PNG/JPEG/WebP/GIF bytes are preserved, not
+re-encoded. Identical bytes share a content-hashed file across emitters and
+effects exported into the same folder; existing matching files are not rewritten.
+Old unused assets are not deleted; older 64-character filenames can still be opened.
+Deleting an effect in the editor removes its JSON on the next successful save.
+Numeric Three.js DataTextures and geometry
+remain native inline data to preserve precision and stock-loader compatibility.
+Missing images, HTTP/CORS failures, and unsupported image MIME types stop export
+rather than silently producing an incomplete package.
+
+Serve the **whole folder** as static game assets, retaining its structure:
+
+```ts
+import { BatchedRenderer, QuarksLoader, QuarksUtil } from 'three.quarks'
+
+const batch = new BatchedRenderer()
+scene.add(batch)
+new QuarksLoader().load(
+  '/effects/fire.json',
+  (effect) => {
+    scene.add(effect)
+    QuarksUtil.addToBatchRenderer(effect, batch)
+  },
+  undefined,
+  console.error,
+)
+// In the game loop: batch.update(deltaSeconds)
+```
+
+`load()` resolves image paths relative to the JSON URL automatically. If
+fetching JSON yourself and calling `parse()`, set the resource path explicitly:
+`new QuarksLoader().setResourcePath('/effects/').parse(json)`.
 
 `ready` resolves after initialization, not after every external image finishes
 loading. `destroy()` is idempotent, cancels animation/timers, disconnects resize

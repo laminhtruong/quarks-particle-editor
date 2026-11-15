@@ -128,6 +128,21 @@ describe('installed Quarks catalog', () => {
     )
     expect(curve).toContain('class="native-generator"')
     expect(curve).toContain('Bezier curve preview')
+    expect(curve).toContain('data-native-action="edit-curve"')
+    expect(curve).not.toContain('type="number"')
+    expect(curve).not.toContain('Curve segment')
+  })
+
+  it('uses the visual curve editor in nested generators and behaviors too', () => {
+    for (const path of [
+      ['ps', 'startSize', 'x'],
+      ['ps', 'behaviors', 0, 'size'],
+    ] as const) {
+      const html = renderProperty(generatorTemplates.PiecewiseBezier!(), [...path], context)
+      expect(html).toContain('data-native-action="edit-curve"')
+      expect(html).not.toContain('data-native-kind="number"')
+      expect(html).not.toContain('Curve segment')
+    }
   })
 
   it('opens color and gradient generators through dedicated editors', () => {

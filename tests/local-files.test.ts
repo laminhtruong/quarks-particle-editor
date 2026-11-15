@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readTextureFile, resolveLocalTextures } from '../src/local-files'
+import { readTextureFile, resolveFolderTextures, resolveLocalTextures } from '../src/local-files'
 import type { QuarksDocument } from '../src/document'
+import { memoryFolder } from './fixtures/folder'
 
 const png = 'data:image/png;base64,aGVsbG8='
 let readError = false
@@ -42,6 +43,42 @@ afterEach(() => vi.unstubAllGlobals())
 const file = (name = 'smoke.png', size = 42) => ({ name, size }) as File
 
 describe('local textures', () => {
+  it('resolves both legacy and short asset paths through the project directory handle', async () => {
+    const folder = memoryFolder()
+    const legacy = `assets/textures/${'a'.repeat(64)}.png`
+    const short = 'assets/textures/0123456789abcdef.jpg'
+    for (const path of [legacy, short]) folder.files.set(path, new Blob(['image']))
+    const json: QuarksDocument = {
+      metadata: { version: 4.7, type: 'Object' },
+      object: { type: 'Group' },
+      images: [{ url: [legacy, short, legacy] }, { url: 'https://cdn.test/remote.png' }],
+    }
+    const read = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    await resolveFolderTextures(json, folder.directory)
+    expect(json.images![0]!.url).toEqual([png, png, png])
+    expect(json.images![1]!.url).toBe('https://cdn.test/remote.png')
+    expect(read).toHaveBeenCalledTimes(2)
+    json.images = [{ url: 'missing.png' }]
+    await expect(resolveFolderTextures(json, folder.directory)).rejects.toThrow('Missing file')
+  })
+
+  it('reopens folder texture paths exactly, including arrays and duplicate basenames', async () => {
+    const json: QuarksDocument = {
+      metadata: { version: 4.7, type: 'Object' },
+      object: { type: 'Group' },
+      images: [{ url: ['assets/textures/a.png', 'other/a.png', 'assets/textures/a.png'] }],
+    }
+    const files = ['assets/textures/a.png', 'other/a.png'].map(
+      (path) => ({ ...file('a.png'), webkitRelativePath: `export/${path}` }) as File,
+    )
+    const read = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    await resolveFolderTextures(json, files)
+    expect(json.images![0]!.url).toEqual([png, png, png])
+    expect(read.mock.calls.map(([file]) => file)).toEqual(files)
+    const missing = structuredClone(json)
+    missing.images = [{ url: 'not-found.png' }]
+    await expect(resolveFolderTextures(missing, files)).rejects.toThrow('Missing texture')
+  })
   it('reports whether new local files resolve missing images, without replacing remote URLs', () => {
     const json: QuarksDocument = {
       metadata: { version: 4.7, type: 'Object' },

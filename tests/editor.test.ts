@@ -8,6 +8,8 @@ import { parseQuarksDocument } from '../src/document'
 import type { QuarksDocument } from '../src/document'
 import * as localFiles from '../src/local-files'
 import * as unityPackages from '../src/unity-package'
+import * as projectZip from '../src/project-zip'
+import { memoryFolder } from './fixtures/folder'
 
 const gpu = vi.hoisted(() => ({ dispose: vi.fn(), controlsDispose: vi.fn(), setSize: vi.fn() }))
 vi.mock('three', async (original) => ({
@@ -36,6 +38,7 @@ class ElementStub {
   parent?: ElementStub
   shadowRoot?: ElementStub
   classList = { toggle: vi.fn(), remove: vi.fn(), add: vi.fn() }
+  style = { setProperty: vi.fn() }
   listeners = new Map<string, (event: unknown) => void>()
   elements = new Map<string, ElementStub>()
   querySelector(selector: string): ElementStub {
@@ -50,6 +53,9 @@ class ElementStub {
     return []
   }
   setAttribute() {}
+  removeAttribute() {}
+  showModal() {}
+  click = vi.fn()
   append(...children: ElementStub[]) {
     for (const child of children) {
       child.parent = this
@@ -96,6 +102,9 @@ beforeEach(() => {
   disconnect = vi.fn()
   vi.stubGlobal('document', document)
   vi.stubGlobal('window', browser)
+  vi.stubGlobal('HTMLInputElement', class {})
+  vi.stubGlobal('HTMLTextAreaElement', class {})
+  vi.stubGlobal('HTMLSelectElement', class {})
   vi.stubGlobal(
     'ResizeObserver',
     class {
@@ -114,31 +123,13 @@ beforeEach(() => {
   )
 })
 
-describe('Unity package import workflow', () => {
-  beforeEach(() => {
-    vi.spyOn(document, 'createElement').mockImplementation(
-      () => Object.assign(new ElementStub(), { showModal() {} }) as unknown as HTMLElement,
-    )
-  })
+describe('batch effect import workflow', () => {
   const choosePackage = (root: ElementStub, name = 'effects.unitypackage') => {
-    root.querySelector('[data-unity-input]').listeners.get('change')?.({
-      target: { files: [{ name }] },
-    })
+    dropFiles(root, [{ name }])
   }
-  const chooserFor = async (root: ElementStub) => {
-    await vi.waitFor(() => expect(root.children).toHaveLength(1))
-    const chooser = root.children[0]!
-    Object.defineProperty(chooser, 'isConnected', { get: () => root.children.includes(chooser) })
-    chooser.querySelector('select').value = '0'
-    return chooser
-  }
-  const submit = (chooser: ElementStub) =>
-    chooser.querySelector('form').listeners.get('submit')?.({ preventDefault() {} })
-
-  it('imports the selected prefab, displays a persistent report, and saves native JSON', async () => {
-    const source = effect('converted')
-    const convertPrefab = vi.fn(async () => ({
-      json: source.json,
+  it('imports every prefab in one operation, displays a report, and saves native JSON', async () => {
+    const convertPrefab = vi.fn(async (path: string) => ({
+      json: effect(path.includes('Fire') ? 'fire' : 'smoke').json,
       warnings: ['Unsupported NoiseModule'],
       particleCount: 1,
     }))
@@ -149,15 +140,16 @@ describe('Unity package import workflow', () => {
     const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
     const { editor, root, click } = mount({ saveEffect })
     await editor.ready
-    expect(root.innerHTML).toContain('Import Unity Package')
-    choosePackage(root)
-    const chooser = await chooserFor(root)
-    expect(chooser.innerHTML).toContain('Assets/Smoke.prefab')
-    chooser.querySelector('select').value = '1'
-    submit(chooser)
-    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('01'))
+    expect(root.innerHTML).toContain('data-action="import-effects">Import</button>')
+    expect(root.innerHTML).toContain('accept=".zip,.unitypackage"')
+    click('import-effects')
+    const input = root.querySelector('[data-effects-input]')
+    expect(input.click).toHaveBeenCalledOnce()
+    input.listeners.get('change')?.({ target: { files: [{ name: 'effects.unitypackage' }] } })
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('02'))
     expect(read).toHaveBeenCalledTimes(1)
     expect(convertPrefab).toHaveBeenCalledWith('Assets/Smoke.prefab')
+    expect(convertPrefab).toHaveBeenCalledWith('Assets/Fire.prefab')
     expect(root.querySelector('[data-unity-report-text]').textContent).toContain(
       'Unsupported NoiseModule',
     )
@@ -165,47 +157,43 @@ describe('Unity package import workflow', () => {
     expect(editor.hasUnsavedChanges()).toBe(true)
     click('save')
     await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
-    expect(saveEffect.mock.calls[0]![0]).toBe('converted')
+    expect(saveEffect.mock.calls[0]![0]).toBe('fire')
     expect(saveEffect.mock.calls[0]![1].object.type).toBe('Group')
   })
 
-  it('keeps current edits intact on conversion failure or cancelled replacement', async () => {
+  it('skips failed prefabs and renames duplicates without losing existing edits', async () => {
     const convertPrefab = vi
       .fn()
       .mockRejectedValueOnce(new Error('Nested prefab is unsupported'))
       .mockResolvedValue({ json: effect().json, warnings: [], particleCount: 1 })
     vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
-      prefabs: ['Assets/Fire.prefab'],
+      prefabs: ['Assets/Broken.prefab', 'Assets/One.prefab', 'Assets/Two.prefab'],
       convertPrefab,
     })
-    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    const { editor, root, click, select } = mount({ listEffects: async () => [effect()] })
     await editor.ready
     click('duplicate-system')
     choosePackage(root)
-    const chooser = await chooserFor(root)
-    submit(chooser)
-    await vi.waitFor(() =>
-      expect(chooser.querySelector('[data-unity-status]').textContent).toBe(
-        'Nested prefab is unsupported',
-      ),
-    )
-    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
-    expect(editor.hasUnsavedChanges()).toBe(true)
-    vi.mocked((browser as unknown as Window).confirm).mockReturnValue(false)
-    submit(chooser)
-    await vi.waitFor(() =>
-      expect(chooser.querySelector('[data-unity-status]').textContent).toContain(
-        'Import cancelled',
-      ),
-    )
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('03'))
+    const report = root.querySelector('[data-unity-report-text]').textContent
+    expect(report).toContain('Nested prefab is unsupported')
+    expect(report).toContain('project-effect-2')
+    expect(report).toContain('project-effect-3')
+    expect((browser as unknown as Window).confirm).not.toHaveBeenCalled()
+    select('project-effect')
     expect(root.querySelector('[data-system-count]').textContent).toBe('02')
     expect(editor.hasUnsavedChanges()).toBe(true)
   })
 
   it('routes package drops separately and prevents concurrent imports and mixed-file drops', async () => {
-    const read = vi
-      .spyOn(unityPackages, 'readUnityPackage')
-      .mockResolvedValue({ prefabs: ['Assets/Fire.prefab'], convertPrefab: vi.fn() })
+    let finish!: (value: unityPackages.UnityPrefabImport) => void
+    const read = vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
+      prefabs: ['Assets/Fire.prefab'],
+      convertPrefab: () =>
+        new Promise((resolve) => {
+          finish = resolve
+        }),
+    })
     const { editor, root } = mount()
     await editor.ready
     const drop = (names: string[]) =>
@@ -216,17 +204,16 @@ describe('Unity package import workflow', () => {
     drop(['a.unitypackage', 'b.json'])
     expect(read).not.toHaveBeenCalled()
     drop(['a.unitypackage'])
-    const chooser = await chooserFor(root)
+    await vi.waitFor(() => expect(finish).toBeDefined())
     choosePackage(root)
     expect(read).toHaveBeenCalledTimes(1)
-    chooser.querySelector('[data-cancel]').listeners.get('click')?.({})
-    expect(root.children).toHaveLength(0)
-    choosePackage(root)
-    await chooserFor(root)
-    expect(read).toHaveBeenCalledTimes(2)
+    expect(root.querySelector('.toast').textContent).toContain('Finish the current file operation')
+    finish({ json: effect('fire').json, warnings: [], particleCount: 1 })
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('01'))
+    expect(root.inert).toBe(false)
   })
 
-  it('ignores conversion completion after the dialog was cancelled', async () => {
+  it('ignores conversion completion after the editor was destroyed', async () => {
     let finish!: (value: unityPackages.UnityPrefabImport) => void
     vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
       prefabs: ['Assets/Fire.prefab'],
@@ -238,13 +225,134 @@ describe('Unity package import workflow', () => {
     const { editor, root } = mount()
     await editor.ready
     choosePackage(root)
-    const chooser = await chooserFor(root)
-    submit(chooser)
-    chooser.listeners.get('cancel')?.({ preventDefault() {} })
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    editor.destroy()
     finish({ json: effect('late').json, warnings: [], particleCount: 1 })
     await Promise.resolve()
     expect(root.querySelector('[data-effect-count]').textContent).toBe('00')
     expect(editor.hasUnsavedChanges()).toBe(false)
+  })
+
+  it('keeps the current effect and history when all prefab conversions fail', async () => {
+    vi.spyOn(unityPackages, 'readUnityPackage').mockResolvedValue({
+      prefabs: ['Assets/NotParticles.prefab'],
+      convertPrefab: vi.fn().mockRejectedValue(new Error('No Particle Systems found')),
+    })
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('duplicate-system')
+    choosePackage(root)
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toContain('Imported 0'))
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    shortcut(root, 'z')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('01')
+    expect(root.inert).toBe(false)
+  })
+
+  it('imports a project ZIP into the session and saves all effects plus unused assets', async () => {
+    const path = 'assets/textures/2cf24dba5fb0a30e.png'
+    const read = vi.spyOn(projectZip, 'readProjectZip').mockResolvedValue({
+      effects: [
+        { path: 'fire.json', json: effect('fire').json },
+        { path: 'smoke.json', json: effect('smoke').json },
+      ],
+      files: new Map([[path, new Blob(['hello'], { type: 'image/png' })]]),
+      textures: new Map([['2cf24dba5fb0a30e.png', 'data:image/png;base64,aGVsbG8=']]),
+    })
+    const folder = memoryFolder()
+    const picker = vi.fn(async () => folder.directory)
+    Object.assign(browser, { showDirectoryPicker: picker })
+    const { editor, root, click } = mount({ listEffects: async () => [effect('existing')] })
+    await editor.ready
+    root.querySelector('[data-effects-input]').listeners.get('change')?.({
+      target: { files: [{ name: 'project.zip' }] },
+    })
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('03'))
+    expect(read).toHaveBeenCalledOnce()
+    expect(picker).not.toHaveBeenCalled()
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect([...folder.files.keys()].sort()).toEqual([
+      path,
+      'existing.json',
+      'fire.json',
+      'smoke.json',
+    ])
+    expect(await folder.files.get(path)!.text()).toBe('hello')
+  })
+
+  it('keeps the current project intact when ZIP decoding or asset copying fails', async () => {
+    const folder = memoryFolder()
+    folder.files.set('existing.json', new Blob([JSON.stringify(effect('existing').json)]))
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    const { editor, root, click } = mount()
+    await editor.ready
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    click('duplicate-system')
+    const read = vi
+      .spyOn(projectZip, 'readProjectZip')
+      .mockRejectedValueOnce(new Error('Broken ZIP'))
+    const choose = () =>
+      root.querySelector('[data-effects-input]').listeners.get('change')?.({
+        target: { files: [{ name: 'project.zip' }] },
+      })
+    choose()
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toBe('Broken ZIP'))
+    read.mockResolvedValue({
+      effects: [{ path: 'new.json', json: effect('new').json }],
+      files: new Map([
+        ['assets/textures/2cf24dba5fb0a30e.png', new Blob(['hello'], { type: 'image/png' })],
+      ]),
+      textures: new Map([['2cf24dba5fb0a30e.png', 'data:image/png;base64,aGVsbG8=']]),
+    })
+    folder.write.mockRejectedValueOnce(new Error('Disk full'))
+    choose()
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toBe('Disk full'))
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    expect(folder.files.size).toBe(1)
+    choose()
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('02'))
+    expect(folder.files.has('assets/textures/2cf24dba5fb0a30e.png')).toBe(true)
+    expect(folder.files.has('new.json')).toBe(false)
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect(folder.files.has('new.json')).toBe(true)
+    expect(
+      JSON.parse(await folder.files.get('existing.json')!.text()).object.children,
+    ).toHaveLength(2)
+  })
+
+  it('skips runtime-invalid ZIP effects while importing the valid ones', async () => {
+    vi.spyOn(projectZip, 'readProjectZip').mockResolvedValue({
+      effects: [
+        { path: 'valid.json', json: effect('valid').json },
+        {
+          path: 'invalid.json',
+          json: {
+            metadata: { type: 'Object', version: 4.7 },
+            object: { type: 'Group', children: [{ type: 'ParticleEmitter' }] },
+          },
+        },
+      ],
+      files: new Map(),
+      textures: new Map(),
+    })
+    const { editor, root } = mount()
+    await editor.ready
+    root.querySelector('[data-effects-input]').listeners.get('change')?.({
+      target: { files: [{ name: 'project.zip' }] },
+    })
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('01'))
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('valid')
+    expect(root.querySelector('[data-unity-report-text]').textContent).toContain(
+      'invalid.json\nSkipped:',
+    )
   })
 })
 
@@ -278,7 +386,25 @@ function mount(options?: ParticleEditorOptions) {
   return { editor, container, root, click, select }
 }
 
+function shortcut(root: ElementStub, key: string, shiftKey = false) {
+  root.listeners.get('keydown')?.({ key, ctrlKey: true, shiftKey, preventDefault() {} })
+}
+
+function dropFiles(root: ElementStub, files: { name: string; [key: string]: unknown }[]) {
+  root.listeners.get('drop')?.({ preventDefault() {}, dataTransfer: { files } })
+}
+
 describe('project-independent particle editor', () => {
+  it('shows only Open project and Save project in the top toolbar', async () => {
+    const { editor, root } = mount()
+    await editor.ready
+    const header = root.innerHTML.split('<header')[1]!.split('</header>')[0]!
+    expect(header.match(/<button /g)).toHaveLength(2)
+    expect(header).toContain('>Open project</button>')
+    expect(header).toContain('>Save project</button>')
+    expect(header).not.toMatch(/Undo|Redo|Import|Export/)
+  })
+
   it('uses a reference grid that cannot occlude particles, without a solid preview floor', async () => {
     const added = vi.spyOn(Scene.prototype, 'add')
     const { editor, click } = mount({ listEffects: async () => [] })
@@ -317,9 +443,9 @@ describe('project-independent particle editor', () => {
     toggle(false)
     expect(added.mock.calls.at(-1)![0].emitter.visible).toBe(false)
     expect(editor.hasUnsavedChanges()).toBe(true)
-    click('undo')
+    shortcut(root, 'z')
     expect(added.mock.calls.at(-1)![0].emitter.visible).toBe(true)
-    click('redo')
+    shortcut(root, 'z', true)
     expect(added.mock.calls.at(-1)![0].emitter.visible).toBe(false)
     click('save')
     await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
@@ -334,31 +460,64 @@ describe('project-independent particle editor', () => {
     ).toBeDefined()
   })
 
-  it('filters unchecked systems from downloads without deleting them from the editor', async () => {
-    vi.spyOn(document, 'createElement').mockImplementation(
-      () => Object.assign(new ElementStub(), { click() {} }) as unknown as HTMLElement,
-    )
-    const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:download')
-    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  it('preserves unchecked systems in a saved project so they can be restored on reopen', async () => {
+    const folder = memoryFolder()
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
     const { editor, root, click } = mount({ listEffects: async () => [effect()] })
     await editor.ready
     click('duplicate-system')
     root.listeners.get('change')?.({ target: { dataset: { systemEnabled: '1' }, checked: false } })
-    for (const action of ['export', 'save']) {
-      click(action)
-      const json = JSON.parse(await (createUrl.mock.calls.at(-1)![0] as Blob).text())
-      expect(json.object.children).toHaveLength(1)
+    for (let index = 0; index < 2; index++) {
+      click('save')
+      await vi.waitFor(() => expect(folder.write).toHaveBeenCalledTimes(index + 1))
+      const json = JSON.parse(await folder.files.get('project-effect.json')!.text())
+      expect(json.object.children).toHaveLength(2)
+      expect(json.object.children[1].visible).toBe(false)
       expect(root.querySelector('[data-system-count]').textContent).toBe('02')
     }
+    root.listeners.get('change')?.({ target: { dataset: { systemEnabled: '0' }, checked: false } })
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    const reopened = new QuarksLoader().parse(
+      JSON.parse(await folder.files.get('project-effect.json')!.text()),
+    )
+    expect(reopened.children.every((child) => child.visible === false)).toBe(true)
   })
 
-  it('blocks export and save when every system is unchecked without losing editor data', async () => {
+  it('omits assets used only by unchecked systems while retaining enabled native textures', async () => {
+    const group = new Group()
+    for (let index = 0; index < 2; index++) {
+      const map = new DataTexture(new Uint8Array([index, 128, 0, 255]), 1, 1)
+      group.add(new ParticleSystem({ material: new MeshBasicMaterial({ map }) }).emitter)
+    }
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({
+      listEffects: async () => [{ id: 'assets', json: parseQuarksDocument(group.toJSON()) }],
+      saveEffect,
+    })
+    await editor.ready
+    root.listeners.get('change')?.({ target: { dataset: { systemEnabled: '1' }, checked: false } })
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledOnce())
+    const json = saveEffect.mock.calls[0]![1]
+    expect(json.images).toHaveLength(1)
+    expect(json.textures).toHaveLength(1)
+    expect(json.materials).toHaveLength(1)
+    expect(new QuarksLoader().parse(json).children).toHaveLength(1)
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+  })
+
+  it('keeps the host save contract when every system is unchecked without losing editor data', async () => {
     const saveEffect = vi.fn(async () => {})
     const createUrl = vi.spyOn(URL, 'createObjectURL')
     const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
     await editor.ready
     root.listeners.get('change')?.({ target: { dataset: { systemEnabled: '0' }, checked: false } })
-    click('export')
     click('save')
     expect(root.querySelector('.toast').textContent).toBe(
       'Enable at least one Particle System before exporting.',
@@ -367,6 +526,178 @@ describe('project-independent particle editor', () => {
     expect(saveEffect).not.toHaveBeenCalled()
     expect(root.querySelector('[data-system-count]').textContent).toBe('01')
     expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
+  it('keeps curve edits in a draft, applies one undoable edit, and shares the lifetime editor', async () => {
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    click('enable-curve')
+    const inspector = root.querySelector('[data-inspector]')
+    expect(inspector.innerHTML).toContain('data-native-action="edit-curve"')
+    expect(inspector.innerHTML).not.toContain('data-curve-index')
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const original = structuredClone(saveEffect.mock.calls[0]![1])
+    const nativeClick = (nativeAction: string) =>
+      root.listeners.get('click')?.({
+        target: {
+          closest: () => ({
+            tagName: 'BUTTON',
+            dataset: { nativeAction, nativePath: '["ps","behaviors",0,"size"]' },
+          }),
+        },
+      })
+    const preset = (i: number) =>
+      inspector.querySelector('.color-editor-dialog').listeners.get('click')?.({
+        target: { closest: () => ({ dataset: { curvePreset: String(i) } }) },
+      })
+    nativeClick('edit-curve')
+    expect(inspector.innerHTML).toContain('Particle System Curves')
+    preset(3)
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    nativeClick('curve-editor-cancel')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    nativeClick('edit-curve')
+    preset(5)
+    nativeClick('curve-editor-apply')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(2))
+    expect(JSON.stringify(saveEffect.mock.calls[1]![1])).toContain('"p0":0,"p1":0,"p2":1,"p3":1')
+    shortcut(root, 'z')
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(3))
+    expect(saveEffect.mock.calls[2]![1]).toEqual(original)
+    shortcut(root, 'z', true)
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(4))
+    expect(saveEffect.mock.calls[3]![1]).toEqual(saveEffect.mock.calls[1]![1])
+  })
+
+  it('keeps custom color edits as a draft until Apply and supports undo', async () => {
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    const nativeClick = (nativeAction: string, nativePath = '[]') =>
+      root.listeners.get('click')?.({
+        target: { closest: () => ({ tagName: 'BUTTON', dataset: { nativeAction, nativePath } }) },
+      })
+    const edit = (hex: string) => {
+      const dialog = root.querySelector('[data-inspector]').querySelector('.color-editor-dialog')
+      dialog.querySelector('.color-editor-body').listeners.get('input')?.({
+        target: { dataset: { pickerHex: '' }, value: hex, setAttribute() {} },
+      })
+    }
+    nativeClick('edit-color', '["ps","startColor","color"]')
+    edit('FF000080')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    nativeClick('color-editor-cancel')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    nativeClick('edit-color', '["ps","startColor","color"]')
+    edit('00FF0080')
+    nativeClick('color-editor-apply')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    expect(JSON.stringify(saveEffect.mock.calls[0]![1])).toContain(
+      '"g":1,"b":0,"a":0.5019607843137255',
+    )
+    shortcut(root, 'z')
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(2))
+    expect(JSON.stringify(saveEffect.mock.calls[1]![1])).not.toContain('0.5019607843137255')
+  })
+
+  it('keeps added and moved gradient keys valid for native JSON', async () => {
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    root.listeners.get('change')?.({
+      target: {
+        dataset: { nativeAction: 'generator', nativePath: '["ps","startColor"]' },
+        value: 'Gradient',
+      },
+    })
+    const nativeClick = (nativeAction: string) =>
+      root.listeners.get('click')?.({
+        target: {
+          closest: () => ({
+            tagName: 'BUTTON',
+            dataset: { nativeAction, nativePath: '["ps","startColor"]' },
+          }),
+        },
+      })
+    nativeClick('edit-gradient')
+    const body = root
+      .querySelector('[data-inspector]')
+      .querySelector('.color-editor-dialog')
+      .querySelector('.color-editor-body')
+    const add = () =>
+      body.listeners.get('click')?.({
+        target: { closest: () => ({ dataset: { pickerAction: 'add-color' } }) },
+      })
+    const move = (pos: number) =>
+      body.listeners.get('input')?.({
+        target: { dataset: { keyPosition: '' }, value: String(pos), valueAsNumber: pos },
+      })
+    add()
+    move(0)
+    add()
+    add()
+    move(100)
+    nativeClick('color-editor-apply')
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const saved = saveEffect.mock.calls[0]![1].object.children![0] as {
+      ps: { startColor: { color: { keys: { pos: number }[] } } }
+    }
+    const stops = saved.ps.startColor.color.keys
+    expect(stops).toHaveLength(5)
+    for (let i = 1; i < stops.length; i++) expect(stops[i]!.pos).toBeGreaterThan(stops[i - 1]!.pos)
+    expect(root.querySelector('.toast').textContent).not.toContain('strictly increasing')
+  })
+
+  it('uses the custom picker for material colors without changing their numeric format', async () => {
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    const nativeClick = (nativeAction: string) =>
+      root.listeners.get('click')?.({
+        target: {
+          closest: () => ({
+            tagName: 'BUTTON',
+            dataset: { nativeAction, nativePath: '["document","materials",0,"color"]' },
+          }),
+        },
+      })
+    nativeClick('edit-color')
+    const body = root
+      .querySelector('[data-inspector]')
+      .querySelector('.color-editor-dialog')
+      .querySelector('.color-editor-body')
+    expect(body.innerHTML).not.toContain('data-picker-channel="a"')
+    body.listeners.get('input')?.({
+      target: { dataset: { pickerHex: '' }, value: '12345680', setAttribute() {} },
+    })
+    nativeClick('color-editor-apply')
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    expect(saveEffect.mock.calls[0]![1].materials).toEqual(
+      expect.arrayContaining([expect.objectContaining({ color: 0x123456 })]),
+    )
+  })
+
+  it('uses the same gradient editor for Color over Lifetime', async () => {
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('enable-color')
+    const markup = root.querySelector('[data-inspector]').innerHTML
+    expect(markup).toContain(
+      'data-native-path="[&quot;ps&quot;,&quot;behaviors&quot;,0,&quot;color&quot;]"',
+    )
+    expect(markup).toContain('data-native-action="edit-gradient"')
+    expect(markup).not.toContain('type="color"')
   })
 
   it('resolves textures imported after JSON without losing edits or inactive effects', async () => {
@@ -397,6 +728,12 @@ describe('project-independent particle editor', () => {
     })
     const embedded = 'data:image/png;base64,aGVsbG8='
     vi.spyOn(localFiles, 'readTextureFile').mockResolvedValue(embedded)
+    const folder = memoryFolder()
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('hello', { headers: { 'Content-Type': 'image/png' } })),
+    )
     const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
     const { editor, root, click, select } = mount({
       listEffects: async () => [first, second],
@@ -407,13 +744,15 @@ describe('project-independent particle editor', () => {
       target: { dataset: { nativePath: '["ps","duration"]', nativeKind: 'number' }, value: '7' },
     })
     root.querySelector('[data-texture-input]').listeners.get('change')?.({
-      target: { files: [{ name: 'smoke.png' }] },
+      target: { files: [new File(['hello'], 'smoke.png', { type: 'image/png' })] },
     })
     await vi.waitFor(() => expect(load.mock.calls.at(-1)![0].images![0]!.url).toBe(embedded))
     expect(root.querySelector('[data-inspector]').innerHTML).toContain('value="7"')
     click('save')
-    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
-    expect(saveEffect.mock.calls[0]![1].images![0]!.url).toBe(embedded)
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect(saveEffect).not.toHaveBeenCalled()
+    const saved = JSON.parse(await folder.files.get('first.json')!.text())
+    expect(saved.images[0].url).toMatch(/^assets\/textures\/[a-f0-9]{16}\.png$/)
     select('second')
     expect(load.mock.calls.at(-1)![0].images![0]!.url).toBe(embedded)
     expect(first.json.images![0]!.url).toBe('textures/smoke.png')
@@ -443,7 +782,7 @@ describe('project-independent particle editor', () => {
     click('save')
     await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
     expect(JSON.stringify(saveEffect.mock.calls[0]![1])).toContain('Vector3Function')
-    click('undo')
+    shortcut(root, 'z')
     expect(root.querySelector('[data-inspector]').innerHTML).not.toContain(
       'value="Vector3Function" selected',
     )
@@ -512,7 +851,7 @@ describe('project-independent particle editor', () => {
     const { editor, root } = mount()
     await editor.ready
     expect(root.querySelector('[data-effect-count]').textContent).toBe('00')
-    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Select or create')
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Open a project folder')
     expect(editor.hasUnsavedChanges()).toBe(false)
     expect(fetch).not.toHaveBeenCalled()
   })
@@ -557,11 +896,7 @@ describe('project-independent particle editor', () => {
   it('shows the inspector after importing the first effect into an empty project', async () => {
     const { editor, root } = mount()
     await editor.ready
-    root.querySelector('[data-file-input]').listeners.get('change')?.({
-      target: {
-        files: [{ name: 'imported.json', text: async () => JSON.stringify(effect().json) }],
-      },
-    })
+    dropFiles(root, [{ name: 'imported.json', text: async () => JSON.stringify(effect().json) }])
     await vi.waitFor(() =>
       expect(root.querySelector('[data-inspector]').innerHTML).toContain('inspector-head'),
     )
@@ -584,9 +919,8 @@ describe('project-independent particle editor', () => {
     const { editor, root } = mount({ listEffects: async () => [effect()] })
     await editor.ready
     const text = vi.fn()
-    root.querySelector('[data-file-input]').listeners.get('change')?.({
-      target: { files: [{ name: 'huge.json', size: 64 * 1024 * 1024 + 1, text }] },
-    })
+    dropFiles(root, [{ name: 'huge.json', size: 64 * 1024 * 1024 + 1, text }])
+    await vi.advanceTimersByTimeAsync(0)
     expect(text).not.toHaveBeenCalled()
     expect(root.querySelector('.toast').textContent).toContain('64 MB')
     expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
@@ -603,40 +937,268 @@ describe('project-independent particle editor', () => {
         children: [{ type: 'ParticleEmitter' }],
       },
     }
-    root.querySelector('[data-file-input]').listeners.get('change')?.({
-      target: { files: [{ name: 'broken.json', text: async () => JSON.stringify(json) }] },
-    })
+    dropFiles(root, [{ name: 'broken.json', text: async () => JSON.stringify(json) }])
     await vi.waitFor(() => expect(root.querySelector('.toast').textContent).not.toBe(''))
     expect(root.querySelector('[data-inspector]').innerHTML).toContain('project-effect')
     expect(editor.hasUnsavedChanges()).toBe(false)
   })
 
-  it('downloads JSON without a backend and keeps a discard snapshot', async () => {
-    const download = vi.fn()
-    vi.stubGlobal(
-      'document',
-      Object.assign(new ElementStub(), {
-        baseURI: 'https://example.com/',
-        createElement: () => Object.assign(new ElementStub(), { click: download }),
-      }),
-    )
-    const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:download')
-    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  it('saves all effects to a selected folder and retains edits when switching effects', async () => {
+    const folder = memoryFolder()
+    const picker = vi.fn(async () => folder.directory)
+    Object.assign(browser, { showDirectoryPicker: picker })
     const { editor, root, click, select } = mount({
       listEffects: async () => [effect('first'), effect('second')],
     })
     await editor.ready
     click('duplicate-system')
+    select('second')
+    click('duplicate-system')
+    select('first')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    expect((browser as unknown as Window).confirm).not.toHaveBeenCalled()
     click('save')
-    expect(download).toHaveBeenCalledTimes(1)
-    expect(createUrl).toHaveBeenCalledWith(expect.any(Blob))
-    expect(revoke).toHaveBeenCalledWith('blob:download')
-    expect(root.querySelector('.toast').textContent).toContain('original file unchanged')
-    expect(editor.hasUnsavedChanges()).toBe(false)
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect(picker).toHaveBeenCalledWith({ mode: 'readwrite' })
+    expect(folder.files.has('first.json')).toBe(true)
+    expect(folder.files.has('second.json')).toBe(true)
+    expect(JSON.parse(await folder.files.get('second.json')!.text()).object.children).toHaveLength(
+      2,
+    )
+    expect(root.querySelector('.toast').textContent).toContain('Saved project')
     click('duplicate-system')
     select('second')
     select('first')
+    expect(root.querySelector('[data-system-count]').textContent).toBe('03')
+  })
+
+  it('keeps edits on picker cancellation, declined overwrite, unsupported browser, or write failure', async () => {
+    const folder = memoryFolder()
+    const picker = vi
+      .fn()
+      .mockRejectedValueOnce(new DOMException('Cancelled', 'AbortError'))
+      .mockResolvedValue(folder.directory)
+    Object.assign(browser, { showDirectoryPicker: picker })
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('duplicate-system')
+    click('save')
+    await vi.waitFor(() => expect(picker).toHaveBeenCalledOnce())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    folder.files.set('project-effect.json', new Blob(['old']))
+    vi.mocked((browser as unknown as Window).confirm).mockReturnValue(false)
+    click('save')
+    await vi.waitFor(() => expect((browser as unknown as Window).confirm).toHaveBeenCalled())
+    expect(folder.write).not.toHaveBeenCalled()
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    await Promise.resolve()
+    vi.mocked((browser as unknown as Window).confirm).mockReturnValue(true)
+    folder.write.mockRejectedValueOnce(new Error('Disk full'))
+    click('save')
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toBe('Disk full'))
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    expect(await folder.files.get('project-effect.json')!.text()).toBe('old')
+    Object.assign(browser, { showDirectoryPicker: undefined })
+    click('save')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Chrome or Edge'),
+    )
+    expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
+  it('opens every root JSON in a project, remembers filenames, and saves without another picker', async () => {
+    const folder = memoryFolder()
+    folder.files.set('Reopened effect.json', new Blob([JSON.stringify(effect('reopened').json)]))
+    folder.files.set('second.json', new Blob([JSON.stringify(effect('second').json)]))
+    const picker = vi.fn(async () => folder.directory)
+    Object.assign(browser, { showDirectoryPicker: picker })
+    const { editor, root, click, select } = mount()
+    await editor.ready
+    shortcut(root, 'o')
+    await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('02'))
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('reopened')
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    click('duplicate-system')
+    select('second')
+    click('duplicate-system')
+    select('reopened-effect')
     expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    shortcut(root, 's')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect(picker).toHaveBeenCalledOnce()
+    expect(
+      JSON.parse(await folder.files.get('Reopened effect.json')!.text()).object.children,
+    ).toHaveLength(2)
+    expect(JSON.parse(await folder.files.get('second.json')!.text()).object.children).toHaveLength(
+      2,
+    )
+    expect(folder.files.size).toBe(2)
+  })
+
+  it('copies browsed files immediately, deduplicates bytes, and reopens unused textures', async () => {
+    const folder = memoryFolder()
+    const picker = vi.fn(async () => folder.directory)
+    Object.assign(browser, { showDirectoryPicker: picker })
+    vi.spyOn(localFiles, 'readTextureFile').mockResolvedValue('data:image/png;base64,aGVsbG8=')
+    const { editor, root, click } = mount()
+    await editor.ready
+    click('import-texture')
+    const input = root.querySelector('[data-texture-input]')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Click Browse again'),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(input.click).not.toHaveBeenCalled()
+    click('import-texture')
+    await vi.waitFor(() => expect(input.click).toHaveBeenCalledOnce())
+    await vi.advanceTimersByTimeAsync(0)
+    input.listeners.get('change')?.({
+      target: {
+        files: [
+          new File(['hello'], 'smoke.png', { type: 'image/png' }),
+          new File(['hello'], 'same-texture.png', { type: 'image/png' }),
+          new File(['different'], 'spark.png', { type: 'image/png' }),
+        ],
+      },
+    })
+    await vi.waitFor(() =>
+      expect(root.querySelector('[data-texture-list]').innerHTML).toContain('spark.png'),
+    )
+    expect(folder.files.size).toBe(2)
+    expect(
+      [...folder.files.keys()].every((path) => /^assets\/textures\/[a-f0-9]{16}\.png$/.test(path)),
+    ).toBe(true)
+    expect(folder.write).toHaveBeenCalledTimes(2)
+    expect(picker).toHaveBeenCalledOnce()
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    const markup = root.querySelector('[data-texture-list]').innerHTML
+    for (const path of folder.files.keys()) expect(markup).toContain(path.split('/').at(-1))
+  })
+
+  it('does not add a texture to the library if copying to the project fails', async () => {
+    const folder = memoryFolder()
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    vi.spyOn(localFiles, 'readTextureFile').mockResolvedValue('data:image/png;base64,aGVsbG8=')
+    folder.write.mockRejectedValueOnce(new Error('Disk full'))
+    const { editor, root } = mount()
+    await editor.ready
+    root.querySelector('[data-texture-input]').listeners.get('change')?.({
+      target: { files: [new File(['hello'], 'smoke.png', { type: 'image/png' })] },
+    })
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toBe('Disk full'))
+    expect(root.querySelector('[data-texture-list]').innerHTML).not.toContain(
+      'data-texture="smoke.png"',
+    )
+    expect(folder.files.size).toBe(0)
+    expect(folder.abort).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the current project and edits when opening is declined, cancelled, or invalid', async () => {
+    const current = memoryFolder()
+    current.files.set('first.json', new Blob([JSON.stringify(effect('first').json)]))
+    const invalid = memoryFolder()
+    invalid.files.set('valid.json', new Blob([JSON.stringify(effect('other').json)]))
+    invalid.files.set('broken.json', new Blob(['not json']))
+    const picker = vi
+      .fn()
+      .mockResolvedValueOnce(current.directory)
+      .mockRejectedValueOnce(new DOMException('Cancelled', 'AbortError'))
+      .mockResolvedValueOnce(invalid.directory)
+    Object.assign(browser, { showDirectoryPicker: picker })
+    const { editor, root, click } = mount()
+    await editor.ready
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    click('duplicate-system')
+    vi.mocked((browser as unknown as Window).confirm).mockReturnValue(false)
+    click('open-project')
+    expect(picker).toHaveBeenCalledOnce()
+    vi.mocked((browser as unknown as Window).confirm).mockReturnValue(true)
+    click('open-project')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).not.toContain('Opened project'),
+    )
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect(JSON.parse(await current.files.get('first.json')!.text()).object.children).toHaveLength(
+      2,
+    )
+    expect(await invalid.files.get('broken.json')!.text()).toBe('not json')
+    expect(picker).toHaveBeenCalledTimes(3)
+  })
+
+  it('saves project deletions without removing unrelated files or unused textures', async () => {
+    const folder = memoryFolder()
+    folder.files.set('first.json', new Blob([JSON.stringify(effect('first').json)]))
+    folder.files.set('second.json', new Blob([JSON.stringify(effect('second').json)]))
+    folder.files.set('notes.txt', new Blob(['keep']))
+    folder.files.set('assets/textures/old.png', new Blob(['image'], { type: 'image/png' }))
+    vi.spyOn(localFiles, 'readTextureFile').mockResolvedValue('data:image/png;base64,aGVsbG8=')
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    const { editor, root, click } = mount()
+    await editor.ready
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    click('delete-effect')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    expect(folder.files.has('first.json')).toBe(true)
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect([...folder.files.keys()].sort()).toEqual([
+      'assets/textures/old.png',
+      'notes.txt',
+      'second.json',
+    ])
+    click('delete-effect')
+    await vi.advanceTimersByTimeAsync(0)
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+    expect(folder.files.has('second.json')).toBe(false)
+  })
+
+  it('keeps edits made while a folder save is pending and prevents concurrent exports', async () => {
+    const folder = memoryFolder()
+    let choose!: (directory: FileSystemDirectoryHandle) => void
+    const picker = vi.fn(
+      () =>
+        new Promise<FileSystemDirectoryHandle>((resolve) => {
+          choose = resolve
+        }),
+    )
+    Object.assign(browser, { showDirectoryPicker: picker })
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('duplicate-system')
+    click('save')
+    click('duplicate-system')
+    click('save')
+    expect(picker).toHaveBeenCalledOnce()
+    choose(folder.directory)
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Saved project'),
+    )
+    expect(
+      JSON.parse(await folder.files.get('project-effect.json')!.text()).object.children,
+    ).toHaveLength(2)
+    expect(root.querySelector('[data-system-count]').textContent).toBe('03')
+    expect(editor.hasUnsavedChanges()).toBe(true)
   })
 
   it('restores the last saved custom effect, not a bundled preset, on discard', async () => {
@@ -764,7 +1326,7 @@ describe('project-independent particle editor', () => {
     expect(root.querySelector('[data-effect-count]').textContent).toBe('01')
     finish()
     await vi.waitFor(() => expect(root.querySelector('[data-effect-count]').textContent).toBe('00'))
-    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Select or create')
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('Open a project folder')
   })
 
   it('rejects unsafe project textures and exposes loading failures through ready', async () => {

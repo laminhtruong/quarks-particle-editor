@@ -24,7 +24,7 @@ shape, and generator, and simulate every behavior with stock Quarks.
 
 | Family   | Modes                                         | Editing                                                                                         |
 | -------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Scalar   | ConstantValue, IntervalValue, PiecewiseBezier | Constant, min/max, arbitrary cubic segments and P0/P1/P2/P3 values; curve preview               |
+| Scalar   | ConstantValue, IntervalValue, PiecewiseBezier | Constant, min/max, visual cubic curve editor with keys, tangent handles, presets, zoom and pan  |
 | Color    | ConstantColor, ColorRange, RandomColor        | Color picker plus full numeric channels/alpha; HDR channel values are retained                  |
 | Gradient | Gradient, RandomColorBetweenGradient          | Independent color/alpha keys, positions, add/remove keys, both random gradients, color preview  |
 | Rotation | AxisAngle, Euler, RandomQuat                  | Axis and angle generators, independent Euler-axis generators and Euler order, random quaternion |
@@ -95,7 +95,12 @@ disabled authoring settings, but not the active effect.
   opacity, alpha/depth flags, side, blending, UV offset/repeat/rotation and sampling.
   This does not add material features that the Quarks batch shaders do not support.
 - Tile counts, frame blending, start tile generator, FrameOverLife animation.
-- Browse/import raster textures, assign them, embed local files in downloaded JSON.
+- Open/save project folders, browse raster textures (copied immediately into
+  `assets/textures/` with 16-character content hashes), assign them, and reopen
+  effects and unused textures together. Undo/redo use keyboard shortcuts.
+- **Effects → Import** adds all effects from a project ZIP or all convertible
+  particle prefabs from a UnityPackage. Existing effects are kept; duplicate names
+  get numeric suffixes. The import report lists conversion warnings and failures.
 
 ## Preview and safety
 

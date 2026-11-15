@@ -17,6 +17,8 @@ import {
   Vector3Function,
   Vector4,
 } from 'three.quarks'
+import { gradientCss } from './color-editor.js'
+import { curvePreview } from './curve-editor.js'
 import type { QuarksDocument } from './document.js'
 
 export type NativeRecord = Record<string, unknown>
@@ -303,7 +305,7 @@ export function renderProperty(
     `<label class="field"><span>${escape(label)}</span><input type="${type}" ${type === 'checkbox' ? (current ? 'checked' : '') : `value="${escape(current)}"`} ${type === 'number' ? 'step="any"' : ''} data-native-path="${attr(path)}" data-native-kind="${typeof current}"></label>`
   if (typeof value === 'number') {
     if (key === 'color' && typeof owner?.type === 'string' && owner.type.endsWith('Material'))
-      return `<label class="field"><span>Color</span><input type="color" value="#${value.toString(16).padStart(6, '0')}" data-native-path="${attr(path)}" data-native-kind="hex"></label>`
+      return `<div class="field"><span>Color</span><button class="native-color-swatch checkerboard" type="button" aria-label="Edit material color" style="--swatch:#${value.toString(16).padStart(6, '0')}" data-native-path="${attr(path)}" data-native-action="edit-color"></button></div>`
     if (key === 'blending')
       return select(
         path,
@@ -413,14 +415,9 @@ export function renderProperty(
   const rgb = ['r', 'g', 'b'].every((channel) => typeof object[channel] === 'number')
   const rgba = `rgba(${['r', 'g', 'b'].map((channel) => Math.round(Math.max(0, Math.min(1, Number(object[channel]))) * 255)).join(',')},${Math.max(0, Math.min(1, Number(object.a ?? 1)))})`
   if (rgb)
-    return `<button class="native-color-swatch" type="button" aria-label="Edit ${escape(label)} color" style="--swatch:${rgba}" data-native-action="edit-color" data-native-path="${attr(path)}"></button>`
+    return `<button class="native-color-swatch checkerboard" type="button" aria-label="Edit ${escape(label)} color" style="--swatch:${rgba}" data-native-action="edit-color" data-native-path="${attr(path)}"></button>`
   if (type === 'Gradient') {
-    const color = object.color as NativeRecord
-    const keys = color?.keys as { value: NativeRecord; pos: number }[] | undefined
-    const gradient = keys?.length
-      ? `linear-gradient(90deg,${keys.map((item) => `rgb(${['r', 'g', 'b'].map((channel) => Math.round(Math.max(0, Math.min(1, Number(item.value[channel]))) * 255)).join(' ')}) ${Math.max(0, Math.min(1, item.pos)) * 100}%`).join(',')})`
-      : 'linear-gradient(90deg,#fff,#000)'
-    const button = `<button class="native-gradient-swatch" type="button" aria-label="Edit ${escape(label)} gradient" style="background:${gradient}" data-native-action="edit-gradient" data-native-path="${attr(path)}"></button>`
+    const button = `<button class="native-gradient-swatch checkerboard" type="button" aria-label="Edit ${escape(label)} gradient" style="--swatch:${gradientCss(object)}" data-native-action="edit-gradient" data-native-path="${attr(path)}"></button>`
     if (compactStartColor) {
       const mode = `<select class="native-generator-mode" aria-label="${escape(label)} mode" data-native-action="generator" data-native-path="${attr(path)}">${options(
         generatorChoices(path, owner).map((item) => [item, propertyLabel(item)]),
@@ -445,14 +442,9 @@ export function renderProperty(
   }
   let preview = ''
   if (type === 'PiecewiseBezier') {
-    const curve = PiecewiseBezier.fromJSON(object)
-    const samples = Array.from({ length: 65 }, (_, index) => curve.genValue([], index / 64))
-    const low = Math.min(0, ...samples),
-      high = Math.max(1, ...samples)
-    const points = samples
-      .map((sample, index) => `${(index * 100) / 64},${95 - ((sample - low) * 90) / (high - low)}`)
-      .join(' ')
-    preview = `<svg class="native-curve" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Bezier curve preview"><polyline points="${points}"/></svg><p class="hint">Cubic control values P0-P3; segment starts use normalized lifetime. Native angles use radians.</p>`
+    preview = `<button class="native-curve-button" type="button" aria-label="Edit ${escape(label)} curve" data-native-action="edit-curve" data-native-path="${attr(path)}">${curvePreview(object)}<span>Click to edit curve</span></button>`
+    if (!compactStartScalar)
+      return `<fieldset class="native-group"><legend>${escape(label)}</legend>${typeControl}${preview}</fieldset>`
   }
   if (compactStartScalar) {
     const labels: Record<string, string> = {
@@ -472,11 +464,7 @@ export function renderProperty(
         : type === 'IntervalValue'
           ? `${input('a', object.a)}${input('b', object.b)}`
           : ''
-    const fields = Object.entries(object)
-      .filter(([name]) => !['type', 'uuid', 'metadata', 'subType'].includes(name))
-      .map(([name, item]) => renderProperty(item, [...path, name], context, object))
-      .join('')
-    return `<div class="native-generator"><div class="native-generator-head"><span class="native-generator-label">${escape(label)}</span>${values}${mode}</div>${type === 'PiecewiseBezier' ? `${preview}${fields}` : ''}</div>`
+    return `<div class="native-generator"><div class="native-generator-head"><span class="native-generator-label">${escape(label)}</span>${values}${mode}</div>${preview}</div>`
   }
   if (compactStartColor && colorTypes.includes(type)) {
     const mode = `<select class="native-generator-mode" aria-label="${escape(label)} mode" data-native-action="generator" data-native-path="${attr(path)}">${options(

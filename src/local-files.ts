@@ -56,3 +56,51 @@ export function resolveLocalTextures(
   }
   return changed
 }
+
+/** Resolve against the selected folder, not the host page or filename-only library. */
+export async function resolveFolderTextures(
+  json: QuarksDocument,
+  files: readonly File[] | FileSystemDirectoryHandle,
+) {
+  const local = new Map(
+    Array.isArray(files)
+      ? files.map((file) => [file.webkitRelativePath.split('/').slice(1).join('/'), file])
+      : [],
+  )
+  await resolveTexturePaths(json, async (path) => {
+    let file = local.get(path)
+    if (!Array.isArray(files)) {
+      let directory = files as FileSystemDirectoryHandle
+      const parts = path.split('/')
+      for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part)
+      file = await (await directory.getFileHandle(parts.at(-1)!)).getFile()
+    }
+    if (!file) throw new Error(`Missing texture in selected folder: ${path}`)
+    return readTextureFile(file)
+  })
+}
+
+/** Share exact project-relative URL semantics for folders and ZIP imports. */
+export async function resolveTexturePaths(
+  json: QuarksDocument,
+  read: (path: string) => Promise<string>,
+) {
+  const loaded = new Map<string, string>()
+  const resolve = async (url: string): Promise<string> => {
+    if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url)) return url
+    const path = decodeURIComponent(new URL(url, 'https://folder.invalid/').pathname.slice(1))
+    const cached = loaded.get(path)
+    if (cached) return cached
+    const data = await read(path)
+    loaded.set(path, data)
+    return data
+  }
+  for (const image of json.images ?? []) {
+    if (typeof image.url === 'string') image.url = await resolve(image.url)
+    else if (Array.isArray(image.url)) {
+      const urls: string[] = []
+      for (const url of image.url) urls.push(await resolve(url as string))
+      image.url = urls
+    }
+  }
+}

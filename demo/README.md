@@ -14,10 +14,9 @@ material, geometry, and texture settings are unchanged.
 ## Open in the editor
 
 1. Run `npm ci` and `npm run dev` from the repository root.
-2. Click **Open JSON** and select `Fire.json`, `Lightning.json`, or `Poison.json`.
-3. Click **Import Textures** and select all PNG files in `demo/textures/`.
-   These two steps work in either order; matching textures refresh the preview
-   automatically, without reopening the JSON.
+2. Copy `demo/` to a separate project folder to keep these reference files intact.
+3. Click **Open project** and select that copy. All three effects open with their
+   textures; select Fire, Lightning, or Poison from the effect list.
 4. Use Play/Restart to inspect the effect. Lightning and Poison are one-shot
    effects; restart to replay them.
 
@@ -27,8 +26,10 @@ Local texture resolution matches exact filenames, including extensions.
 The editor still starts empty; these examples are not automatically imported.
 
 The checked-in JSON references `textures/<filename>.png`; it contains no base64
-images. Downloading after importing local textures embeds those images, following
-the editor's normal portable-download behavior; it does not overwrite these files.
+images. **Save project** updates JSON in the selected folder and writes textures
+into `assets/textures/` with short content-hashed names. Existing unused texture
+files remain untouched. **Textures → Browse** copies additional images into that
+folder immediately.
 
 ## Use in a Three.js project
 
