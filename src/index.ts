@@ -407,7 +407,7 @@ export function createParticleEditor(
       systemList.innerHTML = '<div class="empty-list">Create or import an effect.</div>'
       return
     }
-    systemList.innerHTML = `<div class="hierarchy-row"><span>\u{2304}</span><span class="tree-icon">\u{2733}</span><strong>${esc(displayName(effect))}</strong><span class="row-meta">GROUP</span></div>${nodes.map((node, index) => `<button class="hierarchy-row${index === systemIndex ? ' active' : ''}" type="button" data-system="${index}"><span class="tree-indent"></span><span class="tree-icon">\u{25a7}</span><span>${esc(node.name || `Particle System ${index + 1}`)}</span><span class="row-meta">${index + 1}</span></button>`).join('')}`
+    systemList.innerHTML = `<div class="hierarchy-row"><span>\u{2304}</span><span class="tree-icon">\u{2733}</span><strong>${esc(displayName(effect))}</strong><span class="row-meta">GROUP</span></div>${nodes.map((node, index) => `<div class="hierarchy-row${index === systemIndex ? ' active' : ''}"><input type="checkbox" data-system-enabled="${index}" aria-label="Enable ${esc(node.name || `Particle System ${index + 1}`)}" title="Show in preview and include in exported JSON"${node.visible !== false ? ' checked' : ''}><button class="system-select" type="button" data-system="${index}"><span class="tree-icon">\u{25a7}</span><span>${esc(node.name || `Particle System ${index + 1}`)}</span><span class="row-meta">${index + 1}</span></button></div>`).join('')}`
   }
 
   function colorOf(system: ParticleSystem): [number, number, number, number] {
@@ -1542,7 +1542,7 @@ export function createParticleEditor(
       effect.json = parseQuarksDocument(serializeGroup(currentGroup))
       const revision = editRevision
       const snapshot = structuredClone(effect)
-      if (options.saveEffect) await options.saveEffect(effect.id, structuredClone(effect.json))
+      if (options.saveEffect) await options.saveEffect(effect.id, exportDocument(effect.json))
       else exportCurrent()
       if (destroyed) return
       savedEffects.set(effect.id, snapshot)
@@ -1767,11 +1767,25 @@ export function createParticleEditor(
     }
   }
 
+  function exportDocument(source: QuarksDocument): QuarksDocument {
+    const json = structuredClone(source)
+    const prune = (node: NativeNode): void => {
+      if (!node.children) return
+      node.children = node.children.filter((child) => child.visible !== false)
+      node.children.forEach(prune)
+    }
+    const root = nativeRoot(json)
+    prune(root)
+    if (root.visible === false || !emitterNodes(root).length)
+      throw new Error('Enable at least one Particle System before exporting.')
+    return parseQuarksDocument(json)
+  }
+
   function exportCurrent(): void {
     const effect = currentEffect()
     if (!effect || !currentGroup) return
     syncEffect()
-    const json = effect.json
+    const json = exportDocument(effect.json)
     const url = URL.createObjectURL(
       new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' }),
     )
@@ -2243,6 +2257,14 @@ export function createParticleEditor(
     'change',
     (event) => {
       const target = event.target as HTMLInputElement
+      if (target.dataset.systemEnabled !== undefined) {
+        const emitter = emitters()[Number(target.dataset.systemEnabled)]
+        if (!emitter) return
+        recordHistory()
+        emitter.visible = target.checked
+        markEdit()
+        return
+      }
       if (target.dataset.addBehavior !== undefined && target.value) {
         const system = currentEmitter()?.system
         if (system)

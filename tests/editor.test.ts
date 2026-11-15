@@ -279,6 +279,81 @@ function mount(options?: ParticleEditorOptions) {
 }
 
 describe('project-independent particle editor', () => {
+  it('toggles hierarchy systems in preview, supports undo, and omits unchecked systems on save', async () => {
+    const source = effect()
+    const group = new QuarksLoader().parse(source.json)
+    const hidden = new ParticleSystem({ material: new MeshBasicMaterial(), autoDestroy: false })
+    hidden.emitter.name = 'CentralOrb'
+    const nested = new Group()
+    nested.add(hidden.emitter)
+    group.add(nested)
+    source.json = parseQuarksDocument(group.toJSON())
+    const added = vi.spyOn(BatchedRenderer.prototype, 'addSystem')
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({ listEffects: async () => [source], saveEffect })
+    await editor.ready
+    const toggle = (checked: boolean) =>
+      root.listeners.get('change')?.({
+        target: { dataset: { systemEnabled: '1' }, checked },
+      })
+    expect(root.querySelector('[data-system-list]').innerHTML).toContain(
+      'aria-label="Enable CentralOrb"',
+    )
+    toggle(false)
+    expect(added.mock.calls.at(-1)![0].emitter.visible).toBe(false)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    click('undo')
+    expect(added.mock.calls.at(-1)![0].emitter.visible).toBe(true)
+    click('redo')
+    expect(added.mock.calls.at(-1)![0].emitter.visible).toBe(false)
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const saved = new QuarksLoader().parse(saveEffect.mock.calls[0]![1])
+    expect(saved.getObjectByName('CentralOrb')).toBeUndefined()
+    expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    toggle(true)
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(2))
+    expect(
+      new QuarksLoader().parse(saveEffect.mock.calls[1]![1]).getObjectByName('CentralOrb'),
+    ).toBeDefined()
+  })
+
+  it('filters unchecked systems from downloads without deleting them from the editor', async () => {
+    vi.spyOn(document, 'createElement').mockImplementation(
+      () => Object.assign(new ElementStub(), { click() {} }) as unknown as HTMLElement,
+    )
+    const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:download')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const { editor, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('duplicate-system')
+    root.listeners.get('change')?.({ target: { dataset: { systemEnabled: '1' }, checked: false } })
+    for (const action of ['export', 'save']) {
+      click(action)
+      const json = JSON.parse(await (createUrl.mock.calls.at(-1)![0] as Blob).text())
+      expect(json.object.children).toHaveLength(1)
+      expect(root.querySelector('[data-system-count]').textContent).toBe('02')
+    }
+  })
+
+  it('blocks export and save when every system is unchecked without losing editor data', async () => {
+    const saveEffect = vi.fn(async () => {})
+    const createUrl = vi.spyOn(URL, 'createObjectURL')
+    const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
+    await editor.ready
+    root.listeners.get('change')?.({ target: { dataset: { systemEnabled: '0' }, checked: false } })
+    click('export')
+    click('save')
+    expect(root.querySelector('.toast').textContent).toBe(
+      'Enable at least one Particle System before exporting.',
+    )
+    expect(createUrl).not.toHaveBeenCalled()
+    expect(saveEffect).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-system-count]').textContent).toBe('01')
+    expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
   it('resolves textures imported after JSON without losing edits or inactive effects', async () => {
     const pixel = new DataTexture(new Uint8Array([255, 128, 0, 255]), 1, 1)
     const first = effect('first', new MeshBasicMaterial({ map: pixel }))

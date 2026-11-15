@@ -263,6 +263,22 @@ button.hierarchy-row:hover {
   width: 12px;
   flex-shrink: 0;
 }
+.system-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+.system-select > span:nth-child(2) {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .empty-list {
   padding: 8px;
   margin: 0;

@@ -38,6 +38,12 @@ JSON with external texture URLs can make network requests to those URLs.
 Duplicate texture filenames are rejected instead of silently replacing assets.
 Raster files are limited to 16 MB / 8192 pixels per dimension; JSON to 64 MB.
 
+Use the checkboxes in **Hierarchy** to toggle individual Particle Systems in the
+preview. Unchecked systems are omitted from **Export JSON**, **Download JSON**,
+and **Save to Project**, but remain in the editor so you can re-enable them or
+undo the change. Enable at least one system to export; an exported file cannot
+restore the omitted systems.
+
 ### Import Unity particle prefabs
 
 In Unity, set **Asset Serialization → Force Text**, then export your prefab as a
