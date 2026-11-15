@@ -11,7 +11,14 @@ import {
   Euler,
   Quaternion,
 } from 'three'
-import { BatchedRenderer, ParticleSystem, QuarksLoader, RenderMode } from 'three.quarks'
+import {
+  BatchedRenderer,
+  EmitSubParticleSystem,
+  ParticleSystem,
+  QuarksLoader,
+  RenderMode,
+  SubParticleEmitMode,
+} from 'three.quarks'
 import { readUnityPackage } from '../src/unity-package'
 import { prepareNativeDocument, validateNative } from '../src/native-properties'
 import { readTextureFile } from '../src/local-files'
@@ -944,6 +951,68 @@ describe('Unity package import', () => {
     expect(emitter.ps.behaviors.some((behavior: any) => behavior.type === 'ForceOverLife')).toBe(
       false,
     )
+  })
+
+  it.each([
+    { unityType: 0, mode: SubParticleEmitMode.Birth },
+    { unityType: 2, mode: SubParticleEmitMode.Death },
+  ])(
+    'links Unity sub-emitter event $unityType to its target system',
+    async ({ unityType, mode }) => {
+      const text = prefab.replace(
+        '  NoiseModule: {enabled: 1}',
+        `  SubModule:\n    enabled: 1\n    subEmitters:\n    - emitter: {fileID: 9007199254740998}\n      type: ${unityType}\n      properties: 0\n      emitProbability: 0.75\n  NoiseModule: {enabled: 1}`,
+      )
+      const { json, warnings } = await load(text)
+      const nodes: any[] = []
+      const walk = (node: any) => {
+        nodes.push(node)
+        for (const child of node.children ?? []) walk(child)
+      }
+      walk(json.object)
+      const owner = nodes.find((node) => node.type === 'ParticleEmitter' && node.name === 'Fire')
+      const target = nodes.find(
+        (node) => node.type === 'ParticleEmitter' && node.name === 'Inactive child',
+      )
+      const serialized = owner.ps.behaviors.find(
+        (behavior: any) => behavior.type === 'EmitSubParticleSystem',
+      )
+      expect(serialized).toMatchObject({
+        subParticleSystem: target.uuid,
+        mode,
+        emitProbability: 0.75,
+      })
+      expect(warnings.join('\n')).not.toContain('SubModule is enabled but not converted')
+
+      const probe = structuredClone(json)
+      delete probe.images
+      delete probe.textures
+      for (const material of probe.materials as Record<string, unknown>[]) delete material.map
+      const group = new QuarksLoader().parse(probe)
+      const systems: ParticleSystem[] = []
+      group.traverse((node) => {
+        if ('system' in node) systems.push(node.system as ParticleSystem)
+      })
+      const behavior = systems
+        .flatMap((system) => system.behaviors)
+        .find((item) => item.type === 'EmitSubParticleSystem') as EmitSubParticleSystem
+      expect(behavior.subParticleSystem?.uuid).toBe(target.uuid)
+      expect(behavior.mode).toBe(mode)
+      systems.forEach((system) => system.dispose())
+    },
+  )
+
+  it('warns and skips unsupported Unity sub-emitter events', async () => {
+    const text = prefab.replace(
+      '  NoiseModule: {enabled: 1}',
+      '  SubModule:\n    enabled: 1\n    subEmitters:\n    - emitter: {fileID: 9007199254740998}\n      type: 1\n      properties: 0\n  NoiseModule: {enabled: 1}',
+    )
+    const { json, warnings } = await load(text)
+    const emitter = (json.object as any).children[0].children[1]
+    expect(
+      emitter.ps.behaviors.some((behavior: any) => behavior.type === 'EmitSubParticleSystem'),
+    ).toBe(false)
+    expect(warnings.join('\n')).toContain('Sub emitter event 1')
   })
 
   it('delays burst-only systems without warning, while preserving zero-rate emissions', async () => {

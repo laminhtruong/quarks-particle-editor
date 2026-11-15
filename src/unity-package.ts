@@ -9,6 +9,7 @@ import {
   ConstantColor,
   ConstantValue,
   DonutEmitter,
+  EmitSubParticleSystem,
   EulerGenerator,
   FrameOverLife,
   ForceOverLife,
@@ -26,6 +27,7 @@ import {
   RotationOverLife,
   Rotation3DOverLife,
   SizeOverLife,
+  SubParticleEmitMode,
   SphereEmitter,
   Vector3 as QVector3,
   Vector4 as QVector4,
@@ -469,6 +471,7 @@ async function convertPrefab(
       .map((doc) => [fileId(doc.value.m_GameObject), doc.value]),
   )
   const systems: ParticleSystem[] = []
+  const systemsByUnityId = new Map<string, ParticleSystem>()
   const materials: THREE.Material[] = []
   const textureUrls = new Map<string, string>()
   const materialCache = new Map<string, THREE.MeshBasicMaterial>()
@@ -860,6 +863,7 @@ async function convertPrefab(
             'RotationModule',
             'ClampVelocityModule',
             'UVModule',
+            'SubModule',
           ].includes(key) &&
           enabled(record(module).enabled)
         )
@@ -965,6 +969,7 @@ async function convertPrefab(
         behaviors,
       })
       systems.push(system)
+      systemsByUnityId.set(doc.id, system)
       system.emitter.name = label
       system.emitter.visible = mode !== 5 && enabled(renderer.m_Enabled ?? 1)
       for (let ancestor: THREE.Object3D | null = parent; ancestor; ancestor = ancestor.parent)
@@ -979,6 +984,44 @@ async function convertPrefab(
       )
         system.emitter.rotation.x = -Math.PI / 2
       parent.add(system.emitter)
+    }
+    for (const doc of particles) {
+      const module = record(doc.value.SubModule)
+      if (!enabled(module.enabled)) continue
+      const owner = systemsByUnityId.get(doc.id)!
+      const label = owner.emitter.name
+      const localWarn: Warn = (message) => warn(`${label}: ${message}`)
+      for (const subEmitter of array(module.subEmitters).map(record)) {
+        const target = systemsByUnityId.get(fileId(subEmitter.emitter))
+        if (!target) {
+          localWarn(
+            `Sub emitter ${fileId(subEmitter.emitter)} is not a Particle System in this prefab.`,
+          )
+          continue
+        }
+        const event = number(subEmitter.type, -1)
+        const mode =
+          event === 0
+            ? SubParticleEmitMode.Birth
+            : event === 2
+              ? SubParticleEmitMode.Death
+              : undefined
+        if (mode === undefined) {
+          localWarn(`Sub emitter event ${event} (collision/trigger/manual) is not supported.`)
+          continue
+        }
+        if (enabled(subEmitter.properties))
+          localWarn('Sub emitter inherited particle properties are not converted.')
+        owner.addBehavior(
+          new EmitSubParticleSystem(
+            owner,
+            false,
+            target.emitter,
+            mode,
+            Math.max(0, Math.min(1, number(subEmitter.emitProbability, 1))),
+          ),
+        )
+      }
     }
     root.userData.unityImport = {
       source: asset.path,

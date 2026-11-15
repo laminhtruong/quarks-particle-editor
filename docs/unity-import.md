@@ -44,6 +44,7 @@ etc.), not arbitrary binary Unity assets or VFX Graph.
 | Start life/speed/size, XYZ size, rotation, start color   | Native constant/range/curve/color/gradient generators; XYZ start rotation for mesh particles                                      |
 | Gravity modifier                                         | Applied as world-down acceleration using Unity's default -9.81 m/s²; package does not include project-specific physics gravity    |
 | Emission over time/distance and bursts                   | Includes count, time, cycles, interval and probability; distance emission needs host movement                                     |
+| Birth/death sub-emitters                                 | Linked by Unity component ID; collision/trigger/manual events and inherited particle properties are not converted                 |
 | Animation curves                                         | Unweighted Hermite tangents become cubic Bezier control points; weighted tangents are approximated                                |
 | Random between two curves                                | Uses maximum curve and warns                                                                                                      |
 | Color gradients                                          | Independent color and alpha keys; fixed/perceptual interpolation is approximated as linear                                        |
