@@ -817,6 +817,7 @@ export function createParticleEditor(
       <label class="field"><span>Duration (s)</span><input type="number" min="0.01" step="0.05" value="${num(system.duration)}" data-bind="duration"></label>
       <label class="check-field"><span>Looping</span><input type="checkbox" ${system.looping ? 'checked' : ''} data-bind="looping"></label>
       <label class="field"><span>Simulation Space</span><select data-bind="worldSpace"><option value="false" ${system.worldSpace ? '' : 'selected'}>Local</option><option value="true" ${system.worldSpace ? 'selected' : ''}>World</option></select></label>
+      <p class="hint">World keeps existing particles in place as the group moves; Local moves them with the group. Use World to preview a trail left behind by the emitter.</p>
       <label class="check-field"><span>Prewarm</span><input type="checkbox" ${system.prewarm ? 'checked' : ''} data-bind="prewarm"></label>
       <label class="check-field"><span>Auto destroy</span><input type="checkbox" ${system.autoDestroy ? 'checked' : ''} data-bind="autoDestroy"></label>
       ${renderProperties(ps, ['startLife', 'startSpeed', 'startSize', 'startRotation', 'startColor', 'onlyUsedByOther'], context)}
