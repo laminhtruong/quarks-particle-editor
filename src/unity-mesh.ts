@@ -1,5 +1,30 @@
 import * as THREE from 'three'
 
+/** Unity default resources use stable fileIDs, not entries in the exported package. */
+export function createUnityBuiltinMesh(fileId: string): THREE.BufferGeometry | undefined {
+  let geometry: THREE.BufferGeometry
+  switch (fileId) {
+    case '10202':
+      geometry = Object.assign(new THREE.BoxGeometry(1, 1, 1), { name: 'Cube' })
+      break
+    case '10209':
+      geometry = Object.assign(new THREE.PlaneGeometry(10, 10, 10, 10).rotateX(-Math.PI / 2), {
+        name: 'Plane',
+      })
+      break
+    case '10210':
+      geometry = Object.assign(new THREE.PlaneGeometry(1, 1).scale(1, 1, -1), { name: 'Quad' })
+      break
+    default:
+      return undefined
+  }
+  // Parametric geometry JSON drops baked axis changes; keep the actual vertex data on export.
+  const result = new THREE.BufferGeometry().copy(geometry)
+  result.clearGroups()
+  geometry.dispose()
+  return result
+}
+
 /** Read geometry only: model textures/materials never override the Unity particle material. */
 export async function readUnityMesh(
   data: Uint8Array<ArrayBuffer>,

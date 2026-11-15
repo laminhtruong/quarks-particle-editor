@@ -15,6 +15,8 @@ import { BatchedRenderer, ParticleSystem, QuarksLoader, RenderMode } from 'three
 import { readUnityPackage } from '../src/unity-package'
 import { prepareNativeDocument, validateNative } from '../src/native-properties'
 import { readTextureFile } from '../src/local-files'
+import { prepareFolderExport } from '../src/folder-export'
+import { readMeshJson, resolveMeshAssets } from '../src/mesh-assets'
 import {
   materialGuid,
   meshFbx,
@@ -220,6 +222,105 @@ describe('Unity package import', () => {
     )
     const geometry = (json.geometries as any[]).find((g) => g.name === 'Triangle')
     expect(geometry.data.attributes.position.array[3]).toBeCloseTo(0.02)
+  })
+
+  it.each([
+    ['10210', 'Quad', [1, 1, 0]],
+    ['10209', 'Plane', [10, 0, 10]],
+    ['10202', 'Cube', [1, 1, 1]],
+  ])(
+    'resolves Unity built-in %s (%s) without an archive asset and preserves it through folder export',
+    async (id, name, bounds) => {
+      const text = prefab.replace(
+        'm_RenderMode: 0',
+        `m_RenderMode: 4\n  m_Mesh: {fileID: ${id}, guid: 0000000000000000e000000000000000, type: 0}`,
+      )
+      const entries = packageEntries(text)
+      delete entries[`${materialGuid}/asset`]
+      const { json, warnings } = await load(text, entries)
+      expect(warnings.join('\n')).not.toContain('Using a billboard')
+      const bundle = await prepareFolderExport(json, 'https://game.test/')
+      expect(bundle.files.size).toBe(1)
+      await resolveMeshAssets(bundle.json, (path) => readMeshJson(bundle.files.get(path)!))
+      prepareNativeDocument(bundle.json)
+      validateNative(bundle.json)
+      const root = new QuarksLoader().parse(JSON.parse(JSON.stringify(bundle.json)))
+      const systems: ParticleSystem[] = []
+      root.traverse((node) => {
+        if ('system' in node) systems.push(node.system as ParticleSystem)
+      })
+      const system = systems.find((system) => system.renderMode === RenderMode.Mesh)!
+      expect(system).toBeDefined()
+      const geometry = system.instancingGeometry
+      expect(geometry.name).toBe(name)
+      geometry.computeBoundingBox()
+      const size = geometry.boundingBox!.getSize(new Vector3())
+      bounds.forEach((expected, axis) => expect(size.getComponent(axis)).toBeCloseTo(expected, 8))
+      expect(geometry.hasAttribute('normal')).toBe(true)
+      expect(geometry.hasAttribute('uv')).toBe(true)
+      for (const system of systems) system.dispose()
+    },
+  )
+
+  it('keeps a built-in quad on the ground instead of camera-facing when XYZ start rotation is enabled', async () => {
+    const text = prefab
+      .replace(
+        'm_RenderMode: 0',
+        'm_RenderMode: 4\n  m_Mesh: {fileID: 10210, guid: 0000000000000000e000000000000000, type: 0}',
+      )
+      .replace(
+        'startRotation: {minMaxState: 0, scalar: 0.3}',
+        `rotation3D: 1\n    startRotationX: {scalar: ${Math.PI / 2}}\n    startRotationY: {minMaxState: 3, minScalar: 0, scalar: 6.283185}\n    startRotation: {scalar: 0}`,
+      )
+    const entries = packageEntries(text)
+    delete entries[`${materialGuid}/asset`]
+    const { json } = await load(text, entries)
+    const group = new QuarksLoader().parse(json)
+    new Scene().add(group)
+    group.updateMatrixWorld(true)
+    const renderer = new BatchedRenderer()
+    const systems: ParticleSystem[] = []
+    group.traverse((node) => {
+      if ('system' in node) systems.push(node.system as ParticleSystem)
+    })
+    for (const system of systems) {
+      system.behaviors = []
+      renderer.addSystem(system)
+    }
+    try {
+      renderer.update(1 / 60)
+      const system = systems.find((system) => system.renderMode === RenderMode.Mesh)!
+      expect(system).toBeDefined()
+      expect(system.particleNum).toBeGreaterThan(0)
+      for (const particle of system.particles.slice(0, system.particleNum)) {
+        const rotation = particle.rotation
+        if (typeof rotation !== 'object') throw new Error('Expected mesh particle quaternion')
+        const orientation = new Quaternion(
+          rotation.x,
+          rotation.y,
+          rotation.z,
+          rotation.w,
+        ).premultiply(system.emitter.getWorldQuaternion(new Quaternion()))
+        const normal = new Vector3(0, 0, -1).applyQuaternion(orientation)
+        expect(Math.abs(normal.y)).toBeCloseTo(1, 8)
+      }
+    } finally {
+      for (const system of systems) system.dispose()
+      renderer.dispose()
+    }
+  })
+
+  it.each([
+    [meshGuid, '10210'],
+    ['0000000000000000e000000000000000', '19999'],
+  ])('does not treat unknown mesh reference %s/%s as a built-in quad', async (guid, id) => {
+    const text = prefab.replace(
+      'm_RenderMode: 0',
+      `m_RenderMode: 4\n  m_Mesh: {fileID: ${id}, guid: ${guid}, type: 0}`,
+    )
+    const { json, warnings } = await load(text)
+    expect((json.object as any).children[0].children[1].ps.renderMode).toBe(RenderMode.BillBoard)
+    expect(warnings.join('\n')).toContain('Using a billboard')
   })
 
   it('shares repeated mesh geometry and warns about extra meshes and pivots', async () => {

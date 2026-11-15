@@ -36,30 +36,30 @@ etc.), not arbitrary binary Unity assets or VFX Graph.
 
 ## Conversion scope
 
-| Unity data                                               | Conversion                                                                                                                                       |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GameObject hierarchy, transforms, inactive objects       | Retained, with a Z reflection for handedness; disabled renderers/ancestors hide their emitters                                                   |
-| Duration, looping, prewarm, local/world simulation space | Native Quarks parameters; custom simulation-space references are not resolved                                                                    |
-| Start life/speed/size, XYZ size, rotation, start color   | Native constant/range/curve/color/gradient generators; XYZ start rotation for mesh particles                                                     |
-| Emission over time/distance and bursts                   | Includes count, time, cycles, interval and probability; distance emission needs host movement                                                    |
-| Animation curves                                         | Unweighted Hermite tangents become cubic Bezier control points; weighted tangents are approximated                                               |
-| Random between two curves                                | Uses maximum curve and warns                                                                                                                     |
-| Color gradients                                          | Independent color and alpha keys; fixed/perceptual interpolation is approximated as linear                                                       |
-| Color over lifetime                                      | Constant/gradient and random color/gradient ranges                                                                                               |
-| Size over lifetime                                       | Scalar or separate XYZ; scalar random constants are approximated using the maximum                                                               |
-| Rotation over lifetime                                   | Z angular velocity; mesh particles also support XYZ rotation through native Euler generators                                                     |
-| Limit velocity over lifetime                             | Magnitude limit and dampen; Quarks damping is approximate, separate-axis limits and drag warn                                                    |
-| Sphere, hemisphere, cone, circle, donut, rectangle       | Native shapes where available; distribution may differ; cone volume and boxes are approximated                                                   |
-| Shape offsets/rotation/scale, direction modifiers        | Warned, not applied independently from emitter transforms                                                                                        |
-| Texture sheet                                            | Lifetime-based whole-sheet grid; start frame converted to tile index; single row, FPS/speed and cycles are approximated                          |
-| Billboard, stretched, horizontal/vertical renderer       | Native render modes; stretched length/speed factors and sorting order                                                                            |
-| Mesh renderer                                            | FBX/OBJ converted to native mesh particles; vertex data externalized on project save; GUID + fileID/name lookup, import scale and FBX file units |
-| Render mode None                                         | Hidden emitter                                                                                                                                   |
-| Material                                                 | First material; base/tint color, alpha, alpha clip, depth write, culling, common alpha/additive blending                                         |
-| Main texture                                             | `_BaseMap` / `_MainTex`, UV repeat/offset, wrap, point filtering, sRGB flag; PNG/JPEG/WebP/GIF externalized on folder export                     |
-| Unity shader                                             | Replaced by Quarks unlit material, always reported; custom shader effects/additional maps are not reproduced                                     |
-| Other enabled modules                                    | Named in warnings, not converted (including trails, noise, forces, physics and sub-emitter links)                                                |
-| Scripts, Animator/Animation, VFX Graph                   | Not converted; named in warnings when encountered                                                                                                |
+| Unity data                                               | Conversion                                                                                                                        |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| GameObject hierarchy, transforms, inactive objects       | Retained, with a Z reflection for handedness; disabled renderers/ancestors hide their emitters                                    |
+| Duration, looping, prewarm, local/world simulation space | Native Quarks parameters; custom simulation-space references are not resolved                                                     |
+| Start life/speed/size, XYZ size, rotation, start color   | Native constant/range/curve/color/gradient generators; XYZ start rotation for mesh particles                                      |
+| Emission over time/distance and bursts                   | Includes count, time, cycles, interval and probability; distance emission needs host movement                                     |
+| Animation curves                                         | Unweighted Hermite tangents become cubic Bezier control points; weighted tangents are approximated                                |
+| Random between two curves                                | Uses maximum curve and warns                                                                                                      |
+| Color gradients                                          | Independent color and alpha keys; fixed/perceptual interpolation is approximated as linear                                        |
+| Color over lifetime                                      | Constant/gradient and random color/gradient ranges                                                                                |
+| Size over lifetime                                       | Scalar or separate XYZ; scalar random constants are approximated using the maximum                                                |
+| Rotation over lifetime                                   | Z angular velocity; mesh particles also support XYZ rotation through native Euler generators                                      |
+| Limit velocity over lifetime                             | Magnitude limit and dampen; Quarks damping is approximate, separate-axis limits and drag warn                                     |
+| Sphere, hemisphere, cone, circle, donut, rectangle       | Native shapes where available; distribution may differ; cone volume and boxes are approximated                                    |
+| Shape offsets/rotation/scale, direction modifiers        | Warned, not applied independently from emitter transforms                                                                         |
+| Texture sheet                                            | Lifetime-based whole-sheet grid; start frame converted to tile index; single row, FPS/speed and cycles are approximated           |
+| Billboard, stretched, horizontal/vertical renderer       | Native render modes; stretched length/speed factors and sorting order                                                             |
+| Mesh renderer                                            | FBX/OBJ and built-in Cube/Plane/Quad; native mesh particles; external vertex data on save; model fileID/name, scale and FBX units |
+| Render mode None                                         | Hidden emitter                                                                                                                    |
+| Material                                                 | First material; base/tint color, alpha, alpha clip, depth write, culling, common alpha/additive blending                          |
+| Main texture                                             | `_BaseMap` / `_MainTex`, UV repeat/offset, wrap, point filtering, sRGB flag; PNG/JPEG/WebP/GIF externalized on folder export      |
+| Unity shader                                             | Replaced by Quarks unlit material, always reported; custom shader effects/additional maps are not reproduced                      |
+| Other enabled modules                                    | Named in warnings, not converted (including trails, noise, forces, physics and sub-emitter links)                                 |
+| Scripts, Animator/Animation, VFX Graph                   | Not converted; named in warnings when encountered                                                                                 |
 
 Unity's particle caps, scaling/culling semantics, random seeds, project physics
 settings and render-pipeline-specific behavior are not reproduced. The import
@@ -85,8 +85,11 @@ use. Old `fileIDToRecycleName` and modern `internalIDToNameTable` metadata selec
 the mesh; without that mapping, only a model with exactly one mesh is accepted
 and a warning is recorded. Multiple renderer meshes use the first mesh only.
 Missing, ambiguous, malformed, unsupported, skinned or blend-shape meshes fall
-back to a billboard with a warning. Serialized Unity `.asset` meshes and built-in
-Unity meshes are not yet supported.
+back to a billboard with a warning. Unity's default-resource Cube (1×1×1),
+Plane (10×10, XZ), and Quad (1×1, XY) are resolved by their built-in resource
+GUID and fileID without requiring a package asset, retaining mesh start rotation
+instead of becoming camera-facing billboards. Serialized Unity `.asset` meshes
+and other built-in meshes are not yet supported.
 
 Mesh references use geometry, not model-node placement transforms. FBX geometric
 transforms are handled by Three.js. Unity axis-import overrides, baked axis

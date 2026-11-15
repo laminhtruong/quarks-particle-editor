@@ -33,7 +33,7 @@ import type { ColorGenerator, FunctionColorGenerator, EmitterShape } from 'three
 import { parseQuarksDocument } from './document.js'
 import type { QuarksDocument } from './document.js'
 import { readTextureFile } from './local-files.js'
-import { readUnityMesh } from './unity-mesh.js'
+import { createUnityBuiltinMesh, readUnityMesh } from './unity-mesh.js'
 
 type RecordValue = Record<string, unknown>
 type Warn = (message: string) => void
@@ -478,6 +478,14 @@ async function convertPrefab(
     if (cached) return cached
     const source = assets.get(id)
     try {
+      // This GUID denotes Unity's default resources, not an asset-specific exception.
+      if (id === '0000000000000000e000000000000000') {
+        const geometry = createUnityBuiltinMesh(fileId(reference))
+        if (!geometry)
+          throw new Error(`Unsupported Unity built-in mesh fileID ${fileId(reference)}.`)
+        meshCache.set(key, geometry)
+        return geometry
+      }
       if (!source) throw new Error(`Mesh ${id || '(built-in/missing)'} is not in the package.`)
       const importer = source.meta ? record(yaml(decoder.decode(source.meta)).ModelImporter) : {}
       const legacy = record(importer.fileIDToRecycleName)
