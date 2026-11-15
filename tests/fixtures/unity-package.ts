@@ -3,6 +3,61 @@ import { gzipSync } from 'node:zlib'
 export const prefabGuid = '11111111111111111111111111111111'
 export const materialGuid = '22222222222222222222222222222222'
 export const textureGuid = '33333333333333333333333333333333'
+export const meshGuid = '55555555555555555555555555555555'
+
+// Minimal original FBX, not copied from a Unity asset package. Tabs are required by FBXLoader.
+export const meshFbx = `; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+\tFBXVersion: 7400
+}
+GlobalSettings:  {
+\tProperties70:  {
+\t\tP: "UnitScaleFactor", "double", "Number", "",100
+\t}
+}
+Objects:  {
+\tGeometry: 1, "Geometry::Triangle", "Mesh" {
+\t\tVertices: *9 {
+\t\t\ta: 0,0,0,1,0,0,0,1,1
+\t\t}
+\t\tPolygonVertexIndex: *3 {
+\t\t\ta: 0,1,-3
+\t\t}
+\t}
+\tModel: 2, "Model::Triangle", "Mesh" {
+\t\tProperties70:  {
+\t\t\tP: "Lcl Translation", "Lcl Translation", "", "A",10,20,30
+\t\t}
+\t}
+\tMaterial: 3, "Material::Ignored", "" {
+\t\tShadingModel: "phong"
+\t}
+\tTexture: 4, "Texture::Ignored", "" {
+\t\tFileName: "https://untrusted.invalid/texture.png"
+\t}
+\tVideo: 5, "Video::Ignored", "Clip" {
+\t\tRelativeFilename: "https://untrusted.invalid/texture.png"
+\t}
+}
+Connections:  {
+\tC: "OO",1,2
+\tC: "OO",2,0
+\tC: "OO",3,2
+\tC: "OP",4,3,"DiffuseColor"
+\tC: "OO",5,4
+}
+`
+
+export const meshObj = `mtllib https://untrusted.invalid/material.mtl
+o Triangle
+v 0 0 0
+v 1 0 0
+v 0 1 1
+vt 0 0
+vt 1 0
+vt 0 1
+f 1/1 2/2 3/3
+`
 
 // Hand-authored Unity text serialization; IDs intentionally exceed Number.MAX_SAFE_INTEGER.
 export const prefab = `%YAML 1.1

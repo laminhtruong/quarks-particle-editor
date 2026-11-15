@@ -9,10 +9,12 @@ import {
   ConstantColor,
   ConstantValue,
   DonutEmitter,
+  EulerGenerator,
   FrameOverLife,
   Gradient,
   HemisphereEmitter,
   IntervalValue,
+  LimitSpeedOverLife,
   ParticleSystem,
   PiecewiseBezier,
   PointEmitter,
@@ -20,6 +22,7 @@ import {
   RectangleEmitter,
   RenderMode,
   RotationOverLife,
+  Rotation3DOverLife,
   SizeOverLife,
   SphereEmitter,
   Vector3 as QVector3,
@@ -30,6 +33,7 @@ import type { ColorGenerator, FunctionColorGenerator, EmitterShape } from 'three
 import { parseQuarksDocument } from './document.js'
 import type { QuarksDocument } from './document.js'
 import { readTextureFile } from './local-files.js'
+import { readUnityMesh } from './unity-mesh.js'
 
 type RecordValue = Record<string, unknown>
 type Warn = (message: string) => void
@@ -430,6 +434,52 @@ async function convertPrefab(
   const materialCache = new Map<string, THREE.MeshBasicMaterial>()
   const textureCache = new Map<string, THREE.Texture>()
   const shaderNames = new Map<string, string>()
+  const meshCache = new Map<string, THREE.BufferGeometry>()
+
+  async function mesh(
+    reference: unknown,
+    localWarn: Warn,
+  ): Promise<THREE.BufferGeometry | undefined> {
+    const id = guid(reference)
+    const key = `${id}:${fileId(reference)}`
+    const cached = meshCache.get(key)
+    if (cached) return cached
+    const source = assets.get(id)
+    try {
+      if (!source) throw new Error(`Mesh ${id || '(built-in/missing)'} is not in the package.`)
+      const importer = source.meta ? record(yaml(decoder.decode(source.meta)).ModelImporter) : {}
+      const legacy = record(importer.fileIDToRecycleName)
+      let name = legacy[fileId(reference)]
+      for (const entry of array(importer.internalIDToNameTable).map(record))
+        if (String(record(entry.first)['43'] ?? '') === fileId(reference)) name = entry.second
+      if (
+        name === undefined &&
+        (Object.keys(legacy).length || array(importer.internalIDToNameTable).length)
+      )
+        throw new Error(`Mesh fileID ${fileId(reference)} has no name mapping in ModelImporter.`)
+      const settings = { ...record(importer.meshes), ...importer }
+      const geometry = await readUnityMesh(
+        source.data,
+        source.path,
+        typeof name === 'string' ? name : undefined,
+        number(settings.globalScale, 1),
+        enabled(settings.useFileScale ?? settings.useFileUnits ?? 1),
+      )
+      meshCache.set(key, geometry)
+      if (name === undefined)
+        localWarn('Mesh fileID/name metadata is unavailable; using the only mesh in the model.')
+      // shortcut: axis/alignment overrides are approximated, add axis conversion for non-Y-up assets.
+      localWarn(
+        'Mesh: model-node transforms, axis-import overrides and renderer alignment are not reproduced exactly; verify orientation in preview.',
+      )
+      return geometry
+    } catch (error) {
+      localWarn(
+        `${source?.path ?? 'Mesh'}: ${error instanceof Error ? error.message : 'Could not read mesh'} Using a billboard instead.`,
+      )
+      return undefined
+    }
+  }
 
   async function material(reference: unknown): Promise<THREE.MeshBasicMaterial> {
     const id = guid(reference)
@@ -612,8 +662,10 @@ async function convertPrefab(
       const value = (input: unknown, fallback: number, label: string, factor = 1) =>
         scalar(input, fallback, localWarn, label, factor)
       const mode = number(renderer.m_RenderMode)
-      const renderMode =
-        mode === 1
+      const geometry = mode === 4 ? await mesh(renderer.m_Mesh, localWarn) : undefined
+      const renderMode = geometry
+        ? RenderMode.Mesh
+        : mode === 1
           ? RenderMode.StretchedBillBoard
           : mode === 2
             ? RenderMode.HorizontalBillBoard
@@ -622,10 +674,16 @@ async function convertPrefab(
               : RenderMode.BillBoard
       if (!renderers.has(id))
         localWarn('Missing ParticleSystemRenderer; using billboard rendering.')
-      if (mode === 4)
-        localWarn('Mesh rendering is approximated with billboards; mesh assets are not converted.')
+      if (
+        mode === 4 &&
+        ['m_Mesh1', 'm_Mesh2', 'm_Mesh3'].some((key) => fileId(renderer[key]) !== '0')
+      )
+        localWarn('Multiple renderer meshes are not supported; only the first mesh is used.')
+      if (geometry && ['x', 'y', 'z'].some((axis) => number(record(renderer.m_Pivot)[axis]) !== 0))
+        localWarn('Mesh renderer pivot is not converted.')
       const refs = array(renderer.m_Materials)
-      if (refs.length > 1) localWarn('Only the first renderer material is used.')
+      if (refs.slice(1).some((reference) => fileId(reference) !== '0'))
+        localWarn('Only the first renderer material is used.')
       const mat = await material(refs[0])
       const behaviors = []
       if (enabled(record(data.ColorModule).enabled))
@@ -651,9 +709,48 @@ async function convertPrefab(
         )
       const rotation = record(data.RotationModule)
       if (enabled(rotation.enabled)) {
-        if (enabled(rotation.separateAxes))
-          localWarn('3D rotation over lifetime is approximated by its Z component.')
-        behaviors.push(new RotationOverLife(value(rotation.curve, 0, 'Rotation over Lifetime', -1)))
+        if (geometry)
+          behaviors.push(
+            new Rotation3DOverLife(
+              new EulerGenerator(
+                enabled(rotation.separateAxes)
+                  ? value(rotation.x, 0, 'Rotation X')
+                  : new ConstantValue(0),
+                enabled(rotation.separateAxes)
+                  ? value(rotation.y, 0, 'Rotation Y', -1)
+                  : new ConstantValue(0),
+                value(rotation.curve, 0, 'Rotation Z', -1),
+                'YXZ',
+              ),
+            ),
+          )
+        else {
+          if (enabled(rotation.separateAxes))
+            localWarn('3D rotation over lifetime is approximated by its Z component.')
+          behaviors.push(
+            new RotationOverLife(value(rotation.curve, 0, 'Rotation over Lifetime', -1)),
+          )
+        }
+      }
+      const limit = record(data.ClampVelocityModule)
+      if (enabled(limit.enabled)) {
+        if (enabled(limit.separateAxis ?? limit.separateAxes))
+          localWarn('Limit Velocity: separate-axis limits are not converted.')
+        else {
+          behaviors.push(
+            new LimitSpeedOverLife(
+              lifetimeValue(value(limit.magnitude, 1, 'Speed limit'), localWarn, 'Speed limit'),
+              Math.max(0, Math.min(1, number(limit.dampen, 1))),
+            ),
+          )
+          localWarn('Limit Velocity: Quarks damping approximates Unity damping; motion may differ.')
+        }
+        if (
+          number(record(limit.drag).scalar) ||
+          number(record(limit.drag).minMaxState) ||
+          number(limit.drag)
+        )
+          localWarn('Limit Velocity: drag is not converted.')
       }
       const uv = record(data.UVModule)
       const gridUV = enabled(uv.enabled) && number(uv.mode) === 0
@@ -689,6 +786,7 @@ async function convertPrefab(
             'ColorModule',
             'SizeModule',
             'RotationModule',
+            'ClampVelocityModule',
             'UVModule',
           ].includes(key) &&
           enabled(record(module).enabled)
@@ -702,7 +800,7 @@ async function convertPrefab(
         number(record(data.startDelay).minMaxState) !== 0
       )
         localWarn('Start delay is not converted.')
-      if (enabled(initial.rotation3D))
+      if (!geometry && enabled(initial.rotation3D))
         localWarn('3D start rotation is approximated by its Z component.')
       if (number(initial.gravityModifier) || number(record(initial.gravityModifier).scalar))
         localWarn('Gravity modifier is not converted.')
@@ -714,6 +812,7 @@ async function convertPrefab(
       const activeEmission = enabled(emission.enabled)
       const system = new ParticleSystem({
         material: mat,
+        instancingGeometry: geometry,
         autoDestroy: false,
         duration: number(data.lengthInSec, 5),
         looping: enabled(data.looping),
@@ -729,7 +828,16 @@ async function convertPrefab(
               value(initial.startSizeZ, 1, 'Start Size Z'),
             )
           : value(initial.startSize, 1, 'Start Size'),
-        startRotation: value(initial.startRotation, 0, 'Start Rotation', -1),
+        // The emitter's Z reflection decomposes to a Y half-turn in Quarks mesh rendering.
+        startRotation:
+          geometry && enabled(initial.rotation3D)
+            ? new EulerGenerator(
+                value(initial.startRotationX, 0, 'Start Rotation X'),
+                value(initial.startRotationY, 0, 'Start Rotation Y', -1),
+                value(initial.startRotation, 0, 'Start Rotation Z', -1),
+                'YXZ',
+              )
+            : value(initial.startRotation, 0, 'Start Rotation', -1),
         startColor: color(initial.startColor, localWarn, 'Start Color'),
         emissionOverTime: activeEmission
           ? value(emission.rateOverTime ?? emission.rate, 10, 'Emission rate')
@@ -823,5 +931,6 @@ async function convertPrefab(
       material.dispose()
     }
     for (const texture of textureCache.values()) texture.dispose()
+    for (const geometry of meshCache.values()) geometry.dispose()
   }
 }

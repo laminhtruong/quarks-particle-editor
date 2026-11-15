@@ -28,19 +28,20 @@ etc.), not arbitrary binary Unity assets or VFX Graph.
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | GameObject hierarchy, transforms, inactive objects       | Retained, with a Z reflection for handedness; disabled renderers/ancestors hide their emitters                          |
 | Duration, looping, prewarm, local/world simulation space | Native Quarks parameters; custom simulation-space references are not resolved                                           |
-| Start life/speed/size, XYZ size, Z rotation, start color | Native constant/range/curve/color/gradient generators                                                                   |
+| Start life/speed/size, XYZ size, rotation, start color   | Native constant/range/curve/color/gradient generators; XYZ start rotation for mesh particles                            |
 | Emission over time/distance and bursts                   | Includes count, time, cycles, interval and probability; distance emission needs host movement                           |
 | Animation curves                                         | Unweighted Hermite tangents become cubic Bezier control points; weighted tangents are approximated                      |
 | Random between two curves                                | Uses maximum curve and warns                                                                                            |
 | Color gradients                                          | Independent color and alpha keys; fixed/perceptual interpolation is approximated as linear                              |
 | Color over lifetime                                      | Constant/gradient and random color/gradient ranges                                                                      |
 | Size over lifetime                                       | Scalar or separate XYZ; scalar random constants are approximated using the maximum                                      |
-| Rotation over lifetime                                   | Z angular velocity only; separate-axis rotation warns                                                                   |
+| Rotation over lifetime                                   | Z angular velocity; mesh particles also support XYZ rotation through native Euler generators                            |
+| Limit velocity over lifetime                             | Magnitude limit and dampen; Quarks damping is approximate, separate-axis limits and drag warn                           |
 | Sphere, hemisphere, cone, circle, donut, rectangle       | Native shapes where available; distribution may differ; cone volume and boxes are approximated                          |
 | Shape offsets/rotation/scale, direction modifiers        | Warned, not applied independently from emitter transforms                                                               |
 | Texture sheet                                            | Lifetime-based whole-sheet grid; start frame converted to tile index; single row, FPS/speed and cycles are approximated |
 | Billboard, stretched, horizontal/vertical renderer       | Native render modes; stretched length/speed factors and sorting order                                                   |
-| Mesh renderer                                            | Billboard approximation with warning; mesh assets are not imported                                                      |
+| Mesh renderer                                            | FBX/OBJ geometry embedded as native mesh particles; GUID + fileID/name lookup, import scale and FBX file units          |
 | Render mode None                                         | Hidden emitter                                                                                                          |
 | Material                                                 | First material; base/tint color, alpha, alpha clip, depth write, culling, common alpha/additive blending                |
 | Main texture                                             | `_BaseMap` / `_MainTex`, UV repeat/offset, wrap, point filtering, sRGB flag; embedded PNG/JPEG/WebP/GIF                 |
@@ -54,6 +55,21 @@ report is persistent in the UI after conversion and stored in
 `object.userData.unityImport` in exported JSON. It is not a lossless Unity backup.
 Keep your original package.
 
+Mesh import uses Three.js's FBX/OBJ parsers, without loading model textures,
+material libraries, or external URLs. The prefab's particle material remains in
+use. Old `fileIDToRecycleName` and modern `internalIDToNameTable` metadata select
+the mesh; without that mapping, only a model with exactly one mesh is accepted
+and a warning is recorded. Multiple renderer meshes use the first mesh only.
+Missing, ambiguous, malformed, unsupported, skinned or blend-shape meshes fall
+back to a billboard with a warning. Serialized Unity `.asset` meshes and built-in
+Unity meshes are not yet supported.
+
+Mesh references use geometry, not model-node placement transforms. FBX geometric
+transforms are handled by Three.js. Unity axis-import overrides, baked axis
+conversion and renderer alignment/pivots are not reproduced exactly; inspect
+mesh orientation and scale after importing, especially for non-Y-up source files
+or mirrored/non-uniformly scaled hierarchies. This is not a Unity model importer.
+
 ## Limits and validation
 
 - Compressed package: **128 MB**; expanded tar: **512 MB**.
@@ -63,13 +79,18 @@ Keep your original package.
   **512 Particle Systems**, transform hierarchy depth **128**.
 - Texture: **16 MB**, maximum **8192 × 8192**, decoded using the existing raster
   importer. Unsupported formats are reported rather than loaded remotely.
+- Model source: **16 MB**; selected geometry: **1,000,000 vertices / 1,000,000
+  triangles**, with finite attributes and valid triangle indices. Missing normals
+  are generated and missing UVs become zero UVs. Geometry is shared by repeated
+  references and embedded in exported JSON.
 - Converted JSON: **64 MB**, so the editor can reopen its export.
 - Malformed gzip/tar/YAML, aliases, duplicate fileIDs and missing/cyclic parent
   transforms are rejected. A failed/cancelled import does not replace current edits.
 
 These bounds are not a sandbox or a guaranteed GPU/memory budget. Large packages
-can still consume substantial browser memory, and extreme emission/prewarm values
-can make preview expensive. Review packages from sources you trust.
+and compressed FBX arrays can still consume substantial browser memory before
+geometry validation, and extreme emission/prewarm values can make preview
+expensive. Review packages from sources you trust.
 
 ## Programmatic use
 

@@ -1,12 +1,22 @@
 import { gzipSync } from 'node:zlib'
 import { describe, expect, it, vi } from 'vitest'
-import { AdditiveBlending, ClampToEdgeWrapping, NearestFilter, RepeatWrapping, Scene } from 'three'
-import { BatchedRenderer, ParticleSystem, QuarksLoader } from 'three.quarks'
+import {
+  AdditiveBlending,
+  ClampToEdgeWrapping,
+  NearestFilter,
+  RepeatWrapping,
+  Scene,
+  BufferGeometryLoader,
+} from 'three'
+import { BatchedRenderer, ParticleSystem, QuarksLoader, RenderMode } from 'three.quarks'
 import { readUnityPackage } from '../src/unity-package'
 import { prepareNativeDocument, validateNative } from '../src/native-properties'
 import { readTextureFile } from '../src/local-files'
 import {
   materialGuid,
+  meshFbx,
+  meshGuid,
+  meshObj,
   packageEntries,
   packageFile,
   prefab,
@@ -20,11 +30,214 @@ const imageUrl =
 vi.mock('../src/local-files', () => ({ readTextureFile: vi.fn(async () => imageUrl) }))
 
 const load = async (text = prefab, entries = packageEntries(text)) => {
-  const unity = await readUnityPackage(packageFile(entries))
+  const unity = await readUnityPackage(packageFile({ ...entries, [`${prefabGuid}/asset`]: text }))
   return unity.convertPrefab(unity.prefabs[0]!)
 }
 
+function meshEntries(
+  source = meshFbx,
+  extension = 'fbx',
+): { text: string; entries: Record<string, string> } {
+  const text = prefab.replace(
+    'm_RenderMode: 0',
+    `m_RenderMode: 4\n  m_Mesh: {fileID: 4300000, guid: ${meshGuid}, type: 3}`,
+  )
+  return {
+    text,
+    entries: {
+      ...packageEntries(text),
+      [`${meshGuid}/pathname`]: `Assets/Models/Triangle.${extension}`,
+      [`${meshGuid}/asset`]: source,
+      [`${meshGuid}/asset.meta`]:
+        'ModelImporter:\n  fileIDToRecycleName: {4300000: Triangle}\n  meshes: {globalScale: 2, useFileScale: 1}',
+    },
+  }
+}
+
 describe('Unity package import', () => {
+  it.each([
+    ['fbx', meshFbx],
+    ['obj', meshObj],
+  ])(
+    'embeds %s mesh geometry without loading model textures or node transforms',
+    async (extension, source) => {
+      const { text, entries } = meshEntries(source, extension)
+      delete entries[`${materialGuid}/asset`]
+      const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('No network allowed'))
+      try {
+        const { json, warnings } = await load(text, entries)
+        const emitter = (json.object as any).children[0].children[1]
+        expect(emitter.ps.renderMode).toBe(RenderMode.Mesh)
+        const geometryJSON = (json.geometries as any[]).find(
+          (g) => g.uuid === emitter.ps.instancingGeometry,
+        )
+        const geometry = new BufferGeometryLoader().parse(geometryJSON)
+        expect(geometry.name).toBe('Triangle')
+        expect(Array.from(geometry.getAttribute('position').array)).toEqual([
+          0, 0, 0, 2, 0, 0, 0, 2, 2,
+        ])
+        expect(geometry.hasAttribute('normal')).toBe(true)
+        expect(geometry.hasAttribute('uv')).toBe(true)
+        expect((json.materials as any[]).map((m) => m.name)).not.toContain('Ignored')
+        expect(warnings.join('\n')).not.toContain('Using a billboard')
+        expect(fetch).not.toHaveBeenCalled()
+        prepareNativeDocument(json)
+        validateNative(json)
+        const group = new QuarksLoader().parse(json)
+        new Scene().add(group)
+        const renderer = new BatchedRenderer()
+        const systems: ParticleSystem[] = []
+        group.traverse((node) => {
+          if ('system' in node) systems.push(node.system as ParticleSystem)
+        })
+        for (const system of systems) renderer.addSystem(system)
+        group.updateMatrixWorld(true)
+        for (let i = 0; i < 30; i++) renderer.update(1 / 60)
+        expect(
+          systems.find((system) => system.renderMode === RenderMode.Mesh)!.particleNum,
+        ).toBeGreaterThan(0)
+        for (const system of systems) system.dispose()
+        renderer.dispose()
+        geometry.dispose()
+      } finally {
+        fetch.mockRestore()
+      }
+    },
+  )
+
+  it('resolves modern 64-bit mesh mappings and honors FBX file units', async () => {
+    const { text, entries } = meshEntries(meshFbx.replace('"",100', '"",1'))
+    entries[`${meshGuid}/asset.meta`] =
+      'ModelImporter:\n  internalIDToNameTable:\n  - first: {43: 9007199254740993}\n    second: Triangle\n  globalScale: 2\n  useFileScale: 1'
+    const { json } = await load(
+      text.replace('m_Mesh: {fileID: 4300000', 'm_Mesh: {fileID: 9007199254740993'),
+      entries,
+    )
+    const geometry = (json.geometries as any[]).find((g) => g.name === 'Triangle')
+    expect(geometry.data.attributes.position.array[3]).toBeCloseTo(0.02)
+  })
+
+  it('shares repeated mesh geometry and warns about extra meshes and pivots', async () => {
+    const { text, entries } = meshEntries()
+    const renderer = text
+      .slice(text.indexOf('--- !u!199'), text.indexOf('--- !u!1 &9007199254740996'))
+      .replace('&9007199254740995', '&42')
+      .replace(
+        'm_GameObject: {fileID: 9007199254740992}',
+        'm_GameObject: {fileID: 9007199254740996}',
+      )
+    const { json, warnings } = await load(
+      `${text}${renderer}`.replace(
+        'm_RenderMode: 4',
+        'm_RenderMode: 4\n  m_Mesh1: {fileID: 4300000}\n  m_Pivot: {x: 1}',
+      ),
+      entries,
+    )
+    const group = (json.object as any).children[0]
+    const first = group.children[1].ps.instancingGeometry
+    const second = group.children[0].children[0].ps.instancingGeometry
+    expect(first).toBe(second)
+    expect((json.geometries as any[]).filter((geometry) => geometry.uuid === first)).toHaveLength(1)
+    expect(warnings.join('\n')).toContain('only the first mesh is used')
+    expect(warnings.join('\n')).toContain('pivot is not converted')
+  })
+
+  it('imports mesh XYZ start rotation and both scalar and XYZ lifetime rotations', async () => {
+    const { text, entries } = meshEntries()
+    for (const separate of [0, 1]) {
+      const { json } = await load(
+        text
+          .replace(
+            'startRotation: {',
+            'rotation3D: 1\n    startRotationX: {scalar: 0.1}\n    startRotationY: {scalar: 0.2}\n    startRotation: {',
+          )
+          .replace(
+            'RotationModule:\n    enabled: 1',
+            `RotationModule:\n    enabled: 1\n    separateAxes: ${separate}\n    x: {scalar: 0.4}\n    y: {scalar: 0.5}`,
+          ),
+        entries,
+      )
+      const ps = (json.object as any).children[0].children[1].ps
+      expect(ps.startRotation).toMatchObject({
+        type: 'Euler',
+        eulerOrder: 'YXZ',
+        angleX: { value: 0.1 },
+        angleY: { value: -0.2 },
+        angleZ: { value: -0.3 },
+      })
+      const rotation = ps.behaviors.find((b: any) => b.type === 'Rotation3DOverLife')
+      expect(rotation.angularVelocity).toMatchObject({
+        type: 'Euler',
+        angleX: { value: separate ? 0.4 : 0 },
+        angleY: { value: separate ? -0.5 : 0 },
+        angleZ: { value: -0.2 },
+      })
+    }
+  })
+
+  it('converts magnitude velocity limits and reports unsupported axis limits and drag', async () => {
+    const text = prefab.replace(
+      'NoiseModule: {enabled: 1}',
+      'ClampVelocityModule:\n    enabled: 1\n    magnitude: {scalar: 2}\n    dampen: 0.6\n    drag: {scalar: 0.2}',
+    )
+    const { json, warnings } = await load(text)
+    const ps = (json.object as any).children[0].children[1].ps
+    const limit = ps.behaviors.find((b: any) => b.type === 'LimitSpeedOverLife')
+    expect(limit).toMatchObject({ dampen: 0.6, speed: { type: 'PiecewiseBezier' } })
+    expect(limit.speed.functions[0].function.p0).toBe(2)
+    expect(warnings.join('\n')).toContain('drag is not converted')
+    expect(warnings.join('\n')).not.toContain('ClampVelocityModule is enabled but not converted')
+    const separate = await load(text.replace('dampen: 0.6', 'separateAxis: 1\n    dampen: 0.6'))
+    expect(separate.warnings.join('\n')).toContain('separate-axis limits are not converted')
+  })
+
+  it.each([
+    [
+      'missing asset',
+      (entries: Record<string, string>) => {
+        delete entries[`${meshGuid}/asset`]
+      },
+      'not in the package',
+    ],
+    [
+      'unresolved fileID',
+      (entries: Record<string, string>) => {
+        entries[`${meshGuid}/asset.meta`] =
+          'ModelImporter:\n  fileIDToRecycleName: {4300002: Triangle}'
+      },
+      'no name mapping',
+    ],
+    [
+      'wrong mesh name',
+      (entries: Record<string, string>) => {
+        entries[`${meshGuid}/asset.meta`] =
+          'ModelImporter:\n  fileIDToRecycleName: {4300000: Other}'
+      },
+      'Cannot uniquely resolve',
+    ],
+    [
+      'invalid FBX',
+      (entries: Record<string, string>) => {
+        entries[`${meshGuid}/asset`] = 'not an FBX'
+      },
+      'FBXLoader',
+    ],
+    [
+      'unsupported source',
+      (entries: Record<string, string>) => {
+        entries[`${meshGuid}/pathname`] = 'Assets/Triangle.blend'
+      },
+      'Only FBX and OBJ',
+    ],
+  ])('warns and retains billboard fallback for %s', async (_label, modify, message) => {
+    const { text, entries } = meshEntries()
+    modify(entries)
+    const { json, warnings } = await load(text, entries)
+    expect((json.object as any).children[0].children[1].ps.renderMode).toBe(RenderMode.BillBoard)
+    expect(warnings.join('\n')).toContain(message)
+    expect(warnings.join('\n')).toContain('Using a billboard instead')
+  })
+
   it.each([
     ['star.png', 'image/png'],
     ['star.JPG', 'image/jpeg'],
