@@ -165,7 +165,7 @@ export function createParticleEditor(
   loading.setAttribute('role', 'status')
   loading.setAttribute('aria-live', 'polite')
   loading.innerHTML =
-    '<div class="loading-card"><p data-loading-label></p><progress aria-label="Loading progress"></progress></div>'
+    '<div class="loading-card"><p data-loading-label></p><progress aria-label="Operation progress"></progress></div>'
   shadow.append(loading)
   let lastLoadingYield = 0
 
@@ -1604,6 +1604,7 @@ export function createParticleEditor(
     const effect = currentEffect()
     if (saving || (!effect && options.saveEffect && !projectDirectory)) return
     saving = true
+    root.inert = true
     try {
       syncEffect()
       const revision = editRevision
@@ -1612,11 +1613,17 @@ export function createParticleEditor(
           ? [effect!]
           : effects.filter((item) => !unloadedEffects.has(item.id)),
       )
-      if (options.saveEffect && !projectDirectory) {
-        await options.saveEffect(effect!.id, exportDocument(effect!.json))
+      // Open the picker before yielding so the browser retains the user gesture.
+      const directory =
+        options.saveEffect && !projectDirectory
+          ? undefined
+          : (projectDirectory ?? (await pickProjectDirectory()))
+      await showLoading('Preparing save… Do not close the editor.')
+      if (!directory) {
+        await showLoading('Saving effect… Do not close the editor.', 0, 1)
+        await options.saveEffect!(effect!.id, exportDocument(snapshots[0]!.json))
         savedIds.add(effect!.id)
       } else {
-        const directory = projectDirectory ?? (await pickProjectDirectory())
         if (destroyed) return
         const filenames = snapshots.map(
           (item) => projectFiles.get(item.id) ?? `${slug(item.id)}.json`,
@@ -1628,21 +1635,40 @@ export function createParticleEditor(
           )
             if (!window.confirm(`Replace "${filename}" in the selected folder?`)) return
         }
-        const bundles = await Promise.all(
-          snapshots.map((item) => prepareFolderExport(item.json, document.baseURI)),
-        )
+        const bundles: Awaited<ReturnType<typeof prepareFolderExport>>[] = []
+        for (const [index, item] of snapshots.entries()) {
+          await showLoading(
+            `Preparing ${filenames[index]}… Do not close the editor.`,
+            index,
+            snapshots.length,
+          )
+          bundles.push(await prepareFolderExport(item.json, document.baseURI))
+        }
         if (destroyed) return
+        const total =
+          pendingAssets.size +
+          bundles.reduce((sum, bundle) => sum + bundle.files.size, 0) +
+          bundles.length +
+          [...deletedProjectFiles].filter((name) => !filenames.includes(name)).length
+        let completed = 0
+        const reportWritten = async (path: string) => {
+          await showLoading(`Saved ${path}. Do not close the editor.`, ++completed, total)
+        }
+        await showLoading('Writing project files… Do not close the editor.', completed, total)
         // Finish all assets before replacing any document.
-        await writeFolderAssets(directory, pendingAssets)
-        for (const bundle of bundles) await writeFolderAssets(directory, bundle.files)
+        await writeFolderAssets(directory, pendingAssets, reportWritten)
+        for (const bundle of bundles)
+          await writeFolderAssets(directory, bundle.files, reportWritten)
         for (const [index, bundle] of bundles.entries()) {
           const filename = filenames[index]!
           await writeFolderExport(directory, filename, { json: bundle.json, files: new Map() })
           deletedProjectFiles.delete(filename)
+          await reportWritten(filename)
         }
         for (const filename of deletedProjectFiles) {
           await directory.removeEntry(filename)
           deletedProjectFiles.delete(filename)
+          await showLoading(`Removed ${filename}. Do not close the editor.`, ++completed, total)
         }
         useProjectDirectory(directory)
         pendingAssets.clear()
@@ -1665,6 +1691,8 @@ export function createParticleEditor(
         flash(error instanceof Error ? error.message : 'Could not save Quarks document', true)
     } finally {
       saving = false
+      hideLoading()
+      if (!destroyed) root.inert = false
     }
   }
 
@@ -2660,7 +2688,7 @@ export function createParticleEditor(
   window.addEventListener(
     'beforeunload',
     (event) => {
-      if (dirty) {
+      if (dirty || saving) {
         event.preventDefault()
         event.returnValue = ''
       }

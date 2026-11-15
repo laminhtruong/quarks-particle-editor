@@ -40,8 +40,10 @@ Open the URL printed by Vite:
    goes at its root; images go in `assets/textures/`, mesh data in `assets/meshes/`. Undo/Redo use
    Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y), without toolbar buttons.
 
-Opening and importing display a persistent progress overlay with the current phase
-and file counts where known. Folder JSON is checked when indexed; missing/corrupt
+Opening, importing, and saving display a persistent progress overlay with the current phase
+and file counts where known. Saving locks editor interactions until completion and
+warns against closing the editor; closing the tab during a save triggers the browser's
+unload warning. Host saves stay busy until the callback resolves. Folder JSON is checked when indexed; missing/corrupt
 assets and runtime incompatibilities are reported when their effect is selected,
 without replacing the current effect or its edits. Saving leaves unopened effect
 files and their assets untouched. Archive imports still process all effects before

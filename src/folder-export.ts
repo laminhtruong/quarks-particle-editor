@@ -131,6 +131,7 @@ async function writeFile(directory: FileSystemDirectoryHandle, name: string, blo
 export async function writeFolderAssets(
   directory: FileSystemDirectoryHandle,
   files: ReadonlyMap<string, Blob>,
+  onWritten?: (path: string) => void | Promise<void>,
 ): Promise<void> {
   if (files.size) {
     const assets = await directory.getDirectoryHandle('assets', { create: true })
@@ -154,6 +155,7 @@ export async function writeFolderAssets(
         if (!(await sameContents(await existing.getFile(), blob)))
           throw new Error(`Existing asset is corrupted or has conflicting contents: ${name}`)
       } else await writeFile(directory, name, blob)
+      await onWritten?.(path)
     }
   }
 }

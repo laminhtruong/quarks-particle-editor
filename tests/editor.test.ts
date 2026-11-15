@@ -513,6 +513,118 @@ describe('project-independent particle editor', () => {
     await vi.waitFor(() => expect(loading.hidden).toBe(true))
   })
 
+  it.each([false, true])(
+    'keeps save progress visible until the host finishes (failure=%s)',
+    async (fail) => {
+      let finish!: () => void
+      let reject!: (error: Error) => void
+      const saveEffect = vi.fn(
+        () =>
+          new Promise<void>((resolve, fail) => {
+            finish = resolve
+            reject = fail
+          }),
+      )
+      const { editor, container, root, click } = mount({
+        listEffects: async () => [effect()],
+        saveEffect,
+      })
+      await editor.ready
+      const loading = container.children[0]!.shadowRoot!.children[2]!
+      click('save')
+      expect(loading.hidden).toBe(false)
+      expect(root.inert).toBe(true)
+      expect(saveEffect).not.toHaveBeenCalled()
+      expect(loading.querySelector('[data-loading-label]').textContent).toContain('Do not close')
+      await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledOnce())
+      const preventDefault = vi.fn()
+      browser.listeners.get('beforeunload')?.({ preventDefault })
+      expect(preventDefault).toHaveBeenCalledOnce()
+      click('save')
+      expect(saveEffect).toHaveBeenCalledOnce()
+      if (fail) reject(new Error('Disk full'))
+      else finish()
+      await vi.waitFor(() => expect(loading.hidden).toBe(true))
+      expect(root.inert).toBe(false)
+      expect(root.querySelector('.toast').textContent).toContain(
+        fail ? 'Disk full' : 'Saved native',
+      )
+      if (fail) {
+        click('save')
+        await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(2))
+        finish()
+        await vi.waitFor(() => expect(loading.hidden).toBe(true))
+      }
+    },
+  )
+
+  it('reports folder assets and documents as they finish and stays busy through the last write', async () => {
+    const folder = memoryFolder()
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    const { editor, container, root, click } = mount({
+      listEffects: async () => [meshEffect('first'), effect('second')],
+    })
+    await editor.ready
+    click('duplicate-system')
+    let finish!: () => void
+    folder.write.mockImplementation(async (path) => {
+      if (path === 'second.json')
+        await new Promise<void>((resolve) => {
+          finish = resolve
+        })
+    })
+    click('save')
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    const loading = container.children[0]!.shadowRoot!.children[2]!
+    const progress = loading.querySelector('progress') as unknown as HTMLProgressElement
+    expect(loading.hidden).toBe(false)
+    expect(root.inert).toBe(true)
+    expect(progress.max).toBe(3)
+    expect(progress.value).toBe(2)
+    expect(loading.querySelector('[data-loading-label]').textContent).toContain('Saved first.json')
+    expect(folder.files.has('first.json')).toBe(true)
+    expect(folder.files.has('second.json')).toBe(false)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    finish()
+    await vi.waitFor(() => expect(loading.hidden).toBe(true))
+    expect(progress.value).toBe(3)
+    expect(root.inert).toBe(false)
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    expect(folder.files.has('second.json')).toBe(true)
+  })
+
+  it('unlocks the editor when choosing a save folder is cancelled', async () => {
+    Object.assign(browser, {
+      showDirectoryPicker: vi.fn(async () => {
+        throw new DOMException('Cancelled', 'AbortError')
+      }),
+    })
+    const { editor, container, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('duplicate-system')
+    click('save')
+    await vi.waitFor(() => expect(root.inert).toBe(false))
+    expect(container.children[0]!.shadowRoot!.children[2]!.hidden).toBe(true)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+  })
+
+  it('clears save progress after a failed folder write without clearing unsaved edits', async () => {
+    const folder = memoryFolder()
+    folder.write.mockRejectedValueOnce(new Error('Disk full'))
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    const { editor, container, root, click } = mount({ listEffects: async () => [effect()] })
+    await editor.ready
+    click('duplicate-system')
+    click('save')
+    await vi.waitFor(() => expect(root.querySelector('.toast').textContent).toBe('Disk full'))
+    expect(container.children[0]!.shadowRoot!.children[2]!.hidden).toBe(true)
+    expect(root.inert).toBe(false)
+    expect(editor.hasUnsavedChanges()).toBe(true)
+    expect(folder.abort).toHaveBeenCalledOnce()
+    click('save')
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(false))
+  })
+
   it('loads folder assets only for selected effects and preserves unopened files on save', async () => {
     const folder = memoryFolder()
     folder.files.set('first.json', new Blob([JSON.stringify(effect('first').json)]))
@@ -1018,8 +1130,10 @@ describe('project-independent particle editor', () => {
     await editor.ready
     root.listeners.get('change')?.({ target: { dataset: { systemEnabled: '0' }, checked: false } })
     click('save')
-    expect(root.querySelector('.toast').textContent).toBe(
-      'Enable at least one Particle System before exporting.',
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toBe(
+        'Enable at least one Particle System before exporting.',
+      ),
     )
     expect(createUrl).not.toHaveBeenCalled()
     expect(saveEffect).not.toHaveBeenCalled()
@@ -1384,7 +1498,7 @@ describe('project-independent particle editor', () => {
     click('save')
     click('duplicate-system')
     click('save')
-    expect(saveEffect).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
     finishSave()
     await vi.waitFor(() =>
       expect(root.querySelector('.toast').textContent).toContain('Saved native'),

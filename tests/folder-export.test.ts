@@ -28,6 +28,31 @@ afterEach(() => {
 })
 
 describe('native folder export', () => {
+  it('reports assets only after committing or validating them and awaits each update', async () => {
+    const folder = memoryFolder()
+    const files = new Map([
+      ['assets/textures/first.png', new Blob(['first'])],
+      ['assets/textures/second.png', new Blob(['second'])],
+    ])
+    const report = vi.fn(async (path: string) => {
+      expect(folder.files.get(path)).toBe(files.get(path))
+      await Promise.resolve()
+    })
+    await writeFolderAssets(folder.directory, files, report)
+    await writeFolderAssets(folder.directory, files, report)
+    expect(report.mock.calls.map(([path]) => path)).toEqual([...files.keys(), ...files.keys()])
+    expect(folder.write).toHaveBeenCalledTimes(2)
+    folder.write.mockRejectedValueOnce(new Error('Disk full'))
+    await expect(
+      writeFolderAssets(
+        folder.directory,
+        new Map([['assets/textures/third.png', new Blob(['third'])]]),
+        report,
+      ),
+    ).rejects.toThrow('Disk full')
+    expect(report).toHaveBeenCalledTimes(4)
+  })
+
   it('loads the exported JSON and relative textures through the stock game loader', async () => {
     const group = new Group()
     const system = new ParticleSystem({
