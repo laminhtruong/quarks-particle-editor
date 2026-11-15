@@ -27,7 +27,8 @@ Open the URL printed by Vite:
    even before assignment or saving. If no folder is selected, choose one first,
    then click **Browse** again to choose textures.
    Select a texture to load and assign it to the selected particle system. Unused
-   folder textures initially show a placeholder rather than being decoded up front.
+   folder thumbnails load automatically as they scroll into view, without assigning
+   textures or blocking the preview. Offscreen textures are not decoded up front.
 3. In **Effects**, click **Import** to add another project's `.zip` or all effects
    from a `.unitypackage`. You can also drop an archive, one JSON, or textures into the editor.
    Dropped JSON paths match browsed textures by exact filename including extension;

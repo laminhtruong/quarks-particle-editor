@@ -1,6 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DataTexture, Group, GridHelper, Mesh, MeshBasicMaterial, Scene } from 'three'
+import {
+  DataTexture,
+  Group,
+  GridHelper,
+  Mesh,
+  MeshBasicMaterial,
+  Scene,
+  Texture,
+  TextureLoader,
+} from 'three'
 import type { Object3D } from 'three'
 import { BatchedRenderer, ParticleSystem, QuarksLoader } from 'three.quarks'
 import { createParticleEditor } from '../src/index'
@@ -38,6 +47,10 @@ class ElementStub {
   value = ''
   inert = false
   hidden = false
+  isConnected = true
+  outerHTML = ''
+  title = ''
+  dataset: Record<string, string> = {}
   children: ElementStub[] = []
   parent?: ElementStub
   shadowRoot?: ElementStub
@@ -53,7 +66,7 @@ class ElementStub {
     }
     return element
   }
-  querySelectorAll() {
+  querySelectorAll(): ElementStub[] {
     return []
   }
   setAttribute() {}
@@ -86,6 +99,9 @@ const instances: ParticleEditor[] = []
 let browser: ElementStub
 let disconnect: ReturnType<typeof vi.fn>
 let onResize: () => void
+let onTextureVisibility: (entries: { target: ElementStub; isIntersecting: boolean }[]) => void
+let observeTexture: ReturnType<typeof vi.fn>
+let disconnectTextures: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -104,12 +120,25 @@ beforeEach(() => {
     confirm: vi.fn(() => true),
   })
   disconnect = vi.fn()
+  observeTexture = vi.fn()
+  disconnectTextures = vi.fn()
   vi.stubGlobal('document', document)
   vi.stubGlobal('CSS', { escape: (value: string) => value })
   vi.stubGlobal('window', browser)
   vi.stubGlobal('HTMLInputElement', class {})
   vi.stubGlobal('HTMLTextAreaElement', class {})
   vi.stubGlobal('HTMLSelectElement', class {})
+  vi.stubGlobal(
+    'IntersectionObserver',
+    class {
+      constructor(callback: typeof onTextureVisibility) {
+        onTextureVisibility = callback
+      }
+      observe = observeTexture
+      unobserve = vi.fn()
+      disconnect = disconnectTextures
+    },
+  )
   vi.stubGlobal(
     'ResizeObserver',
     class {
@@ -553,6 +582,143 @@ describe('project-independent particle editor', () => {
     await vi.waitFor(() => expect(loading.hidden).toBe(true))
     expect(root.querySelector('[data-texture-list]').innerHTML).toContain('loading="lazy"')
   })
+
+  it('loads only visible thumbnails sequentially without assigning textures or rebuilding the list', async () => {
+    const folder = memoryFolder()
+    folder.files.set('first.json', new Blob([JSON.stringify(effect('first').json)]))
+    folder.files.set('assets/textures/first.png', new Blob(['png'], { type: 'image/png' }))
+    folder.files.set('assets/textures/second.webp', new Blob(['webp'], { type: 'image/webp' }))
+    let finish!: (url: string) => void
+    const read = vi
+      .spyOn(localFiles, 'readTextureFile')
+      .mockResolvedValue('data:image/webp;base64,c2Vjb25k')
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          }),
+      )
+    const parse = vi.spyOn(QuarksLoader.prototype, 'parse')
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    const { editor, root, click, container } = mount()
+    await editor.ready
+    const first = Object.assign(new ElementStub(), { dataset: { texture: 'first.png' } })
+    const second = Object.assign(new ElementStub(), { dataset: { texture: 'second.webp' } })
+    const list = root.querySelector('[data-texture-list]')
+    list.querySelectorAll = () => [first, second]
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    expect(observeTexture).toHaveBeenCalledWith(first)
+    expect(observeTexture).toHaveBeenCalledWith(second)
+    expect(read).not.toHaveBeenCalled()
+    const inspector = root.querySelector('[data-inspector]').innerHTML
+    const parses = parse.mock.calls.length
+    const markup = list.innerHTML
+    const replaceList = vi.fn()
+    Object.defineProperty(list, 'innerHTML', { get: () => markup, set: replaceList })
+    onTextureVisibility([
+      { target: first, isIntersecting: true },
+      { target: second, isIntersecting: true },
+    ])
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce())
+    onTextureVisibility([{ target: second, isIntersecting: false }])
+    finish('data:image/png;base64,Zmlyc3Q=')
+    await vi.waitFor(() =>
+      expect(first.querySelector('.texture-placeholder').outerHTML).toContain('<img'),
+    )
+    expect(read).toHaveBeenCalledOnce()
+    onTextureVisibility([{ target: second, isIntersecting: true }])
+    await vi.waitFor(() =>
+      expect(second.querySelector('.texture-placeholder').outerHTML).toContain('data:image/webp'),
+    )
+    expect(read).toHaveBeenCalledTimes(2)
+    expect(replaceList).not.toHaveBeenCalled()
+    expect(parse).toHaveBeenCalledTimes(parses)
+    expect(root.querySelector('[data-inspector]').innerHTML).toBe(inspector)
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    expect(root.inert).toBe(false)
+    expect(container.children[0]!.shadowRoot!.children[2]!.hidden).toBe(true)
+    // Assignment reuses the validated image instead of reading/decoding it again.
+    read.mockClear()
+    const load = vi
+      .spyOn(TextureLoader.prototype, 'load')
+      .mockReturnValue(new Texture<HTMLImageElement>())
+    root.listeners.get('click')?.({
+      target: { closest: () => ({ dataset: { texture: 'first.png' } }) },
+    })
+    await vi.waitFor(() => expect(editor.hasUnsavedChanges()).toBe(true))
+    expect(read).not.toHaveBeenCalled()
+    expect(load).toHaveBeenCalledWith('data:image/png;base64,Zmlyc3Q=')
+  })
+
+  it('keeps a failed thumbnail non-blocking and retries decoding when clicked', async () => {
+    const folder = memoryFolder()
+    folder.files.set('assets/textures/repair.png', new Blob(['bad'], { type: 'image/png' }))
+    const read = vi
+      .spyOn(localFiles, 'readTextureFile')
+      .mockRejectedValueOnce(new Error('Could not decode repair.png'))
+      .mockResolvedValue('data:image/png;base64,cmVwYWlyZWQ=')
+    Object.assign(browser, { showDirectoryPicker: vi.fn(async () => folder.directory) })
+    const { editor, root, click } = mount()
+    await editor.ready
+    const button = Object.assign(new ElementStub(), { dataset: { texture: 'repair.png' } })
+    root.querySelector('[data-texture-list]').querySelectorAll = () => [button]
+    click('open-project')
+    await vi.waitFor(() =>
+      expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+    )
+    onTextureVisibility([{ target: button, isIntersecting: true }])
+    await vi.waitFor(() => expect(button.title).toContain('Could not decode repair.png'))
+    expect(root.inert).toBe(false)
+    expect(editor.hasUnsavedChanges()).toBe(false)
+    root.listeners.get('click')?.({
+      target: { closest: () => ({ dataset: { texture: 'repair.png' } }) },
+    })
+    await vi.waitFor(() =>
+      expect(root.querySelector('[data-texture-list]').innerHTML).toContain('data:image/png'),
+    )
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['switching projects', 'closing the editor'])(
+    'discards pending thumbnail results after %s',
+    async (action) => {
+      const folder = memoryFolder()
+      folder.files.set('assets/textures/old.png', new Blob(['image'], { type: 'image/png' }))
+      let finish!: (url: string) => void
+      vi.spyOn(localFiles, 'readTextureFile').mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          }),
+      )
+      const picker = vi.fn(async () => folder.directory)
+      Object.assign(browser, { showDirectoryPicker: picker })
+      const { editor, root, click } = mount()
+      await editor.ready
+      const button = Object.assign(new ElementStub(), { dataset: { texture: 'old.png' } })
+      root.querySelector('[data-texture-list]').querySelectorAll = () => [button]
+      click('open-project')
+      await vi.waitFor(() =>
+        expect(root.querySelector('.toast').textContent).toContain('Opened project'),
+      )
+      onTextureVisibility([{ target: button, isIntersecting: true }])
+      await vi.waitFor(() => expect(finish).toBeDefined())
+      if (action === 'switching projects') {
+        picker.mockResolvedValueOnce(memoryFolder().directory)
+        click('open-project')
+        await vi.waitFor(() =>
+          expect(root.querySelector('[data-texture-list]').innerHTML).toContain('No textures'),
+        )
+      } else editor.destroy()
+      finish('data:image/png;base64,b2xk')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(button.querySelector('.texture-placeholder').outerHTML).toBe('')
+      expect(disconnectTextures).toHaveBeenCalled()
+    },
+  )
 
   it('retains current edits when a deferred mesh is missing and permits retry after repair', async () => {
     const folder = memoryFolder()

@@ -225,6 +225,17 @@ export function createParticleEditor(
   const saveState = $<HTMLElement>('[data-save-state]')
   const textures = new Map<string, string>()
   const textureFiles = new Map<string, FileSystemFileHandle>()
+  const texturePreviewLoads = new Map<FileSystemFileHandle, Promise<string>>()
+  const visibleTexturePreviews = new Set<HTMLElement>()
+  let loadingTexturePreviews = false
+  const textureObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const button = entry.target as HTMLElement
+      if (entry.isIntersecting) visibleTexturePreviews.add(button)
+      else visibleTexturePreviews.delete(button)
+    }
+    void loadTexturePreviews()
+  })
   const unloadedEffects = new Set<string>()
   const defaults = new Map<string, EffectFile>()
   const savedEffects = new Map<string, EffectFile>()
@@ -854,6 +865,8 @@ export function createParticleEditor(
   }
 
   function renderTextures(): void {
+    textureObserver.disconnect()
+    visibleTexturePreviews.clear()
     const ids = new Set([...textureFiles.keys(), ...textures.keys()])
     $('[data-texture-list]').innerHTML = ids.size
       ? [...ids]
@@ -863,6 +876,49 @@ export function createParticleEditor(
           )
           .join('')
       : '<p class="empty-list">No textures. Browse or drop PNG, JPEG, WebP, or GIF files.</p>'
+    for (const button of $('[data-texture-list]').querySelectorAll<HTMLElement>('[data-texture]'))
+      if (!textures.has(button.dataset.texture!)) textureObserver.observe(button)
+  }
+
+  function readLibraryTexture(handle: FileSystemFileHandle): Promise<string> {
+    const cached = texturePreviewLoads.get(handle)
+    if (cached) return cached
+    const reading = handle
+      .getFile()
+      .then(readTextureFile)
+      .catch((error) => {
+        if (texturePreviewLoads.get(handle) === reading) texturePreviewLoads.delete(handle)
+        throw error
+      })
+    texturePreviewLoads.set(handle, reading)
+    return reading
+  }
+
+  async function loadTexturePreviews(): Promise<void> {
+    if (loadingTexturePreviews) return
+    loadingTexturePreviews = true
+    try {
+      // Decode one visible file at a time without assigning it or rebuilding the library.
+      for (const button of visibleTexturePreviews) {
+        visibleTexturePreviews.delete(button)
+        textureObserver.unobserve(button)
+        const id = button.dataset.texture!
+        const handle = textureFiles.get(id)
+        if (!handle || !button.isConnected || destroyed) continue
+        try {
+          const url = await readLibraryTexture(handle)
+          if (destroyed || textureFiles.get(id) !== handle || !button.isConnected) continue
+          const placeholder = button.querySelector('.texture-placeholder')
+          if (placeholder)
+            placeholder.outerHTML = `<img loading="lazy" decoding="async" src="${esc(url)}" alt="">`
+        } catch (error) {
+          if (!destroyed && textureFiles.get(id) === handle && button.isConnected)
+            button.title = `${error instanceof Error ? error.message : 'Could not load texture preview.'} Click to retry.`
+        }
+      }
+    } finally {
+      loadingTexturePreviews = false
+    }
   }
 
   function addGeometry(geometry: THREE.BufferGeometry): void {
@@ -966,7 +1022,7 @@ export function createParticleEditor(
       root.inert = true
       try {
         await showLoading(`Loading texture: ${id}…`)
-        const url = await readTextureFile(await handle.getFile())
+        const url = await readLibraryTexture(handle)
         if (destroyed) return
         textures.set(id, url)
         renderTextures()
@@ -2007,6 +2063,7 @@ export function createParticleEditor(
       unloadedEffects.clear()
       for (const item of loaded.slice(1)) unloadedEffects.add(item.id)
       textures.clear()
+      texturePreviewLoads.clear()
       textureFiles.clear()
       for (const [name, handle] of library) textureFiles.set(name, handle)
       defaults.clear()
@@ -2623,6 +2680,9 @@ export function createParticleEditor(
       window.clearTimeout(previewTimer)
       window.clearTimeout(toastTimer)
       resize?.disconnect()
+      textureObserver.disconnect()
+      visibleTexturePreviews.clear()
+      texturePreviewLoads.clear()
       releasePreview()
       if (scene) disposeObjects(scene)
       controls?.dispose()

@@ -162,6 +162,46 @@ it.skipIf(!process.env.CHROME_PATH)(
         resolve(panes.every(p => p.getBoundingClientRect().height > 0) && columns.scrollHeight > columns.clientHeight);
       }))`),
       ).toBe(true)
+      await send('Emulation.setDeviceMetricsOverride', {
+        width: 1440,
+        height: 900,
+        deviceScaleFactor: 1,
+        mobile: false,
+      })
+      await evaluate(`(async () => {
+        const image = Uint8Array.from(atob('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'), c => c.charCodeAt(0));
+        const files = new Map([['effect.json', new File([JSON.stringify(fixture)], 'effect.json')]]);
+        for (let i=0;i<240;i++) files.set('assets/textures/tile-'+i+'.gif', new File([image], 'tile-'+i+'.gif', {type:'image/gif'}));
+        window.thumbnailReads = [];
+        const at = (prefix='') => ({kind:'directory', name:'thumbnails',
+          async *entries() { for (const key of files.keys()) { const name=key.slice(prefix.length); if(key.startsWith(prefix)&&!name.includes('/')) yield [name, await this.getFileHandle(name)] } },
+          async getDirectoryHandle(name) { return at(prefix+name+'/') },
+          async getFileHandle(name) { return {kind:'file', name, async getFile() { if(name.endsWith('.gif')) thumbnailReads.push(name); return files.get(prefix+name) } } }
+        });
+        window.showDirectoryPicker = async () => at();
+        root.querySelector('[data-action="open-project"]').click();
+        await new Promise((resolve,reject) => { let frames=0; const check=()=>{ const img=root.querySelector('[data-texture] img'); if(root.querySelector('.toast').textContent.includes('Opened project: thumbnails') && img?.naturalWidth) resolve(); else if(++frames>250) reject(new Error('Visible folder thumbnail did not load')); else requestAnimationFrame(check) }; check() });
+      })()`)
+      expect(await evaluate('thumbnailReads.length > 0 && thumbnailReads.length < 240')).toBe(true)
+      expect(await evaluate('testEditor.hasUnsavedChanges()')).toBe(false)
+      await evaluate(`(async () => {
+        window.lastTexture = [...root.querySelectorAll('[data-texture]')].at(-1);
+        lastTexture.scrollIntoView({block:'end'});
+        await new Promise((resolve,reject) => { let frames=0; const check=()=>{ if(lastTexture.querySelector('img')?.naturalWidth) resolve(); else if(++frames>250) reject(new Error('Scrolled thumbnail did not load')); else requestAnimationFrame(check) }; check() });
+      })()`)
+      expect(await evaluate(`thumbnailReads.includes('tile-239.gif')`)).toBe(true)
+      expect(await evaluate('testEditor.hasUnsavedChanges()')).toBe(false)
+      const thumbnailLayout = await measure()
+      await evaluate(`root.querySelector('[data-texture-list]').hidden=true`)
+      const withoutThumbnails = await measure()
+      expect(thumbnailLayout).toBeLessThan(withoutThumbnails * 3 + 0.001)
+      await evaluate(`root.querySelector('[data-texture-list]').hidden=false; lastTexture.click()`)
+      expect(
+        await evaluate(
+          `new Promise(resolve => { const check=()=>root.querySelector('.loading-overlay').hidden?resolve(testEditor.hasUnsavedChanges()):requestAnimationFrame(check);check() })`,
+        ),
+      ).toBe(true)
+      expect(await evaluate(`thumbnailReads.filter(name=>name==='tile-239.gif').length`)).toBe(1)
     } finally {
       chrome.kill()
       await server.close()
