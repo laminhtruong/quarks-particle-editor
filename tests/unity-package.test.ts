@@ -7,6 +7,9 @@ import {
   RepeatWrapping,
   Scene,
   BufferGeometryLoader,
+  Vector3,
+  Euler,
+  Quaternion,
 } from 'three'
 import { BatchedRenderer, ParticleSystem, QuarksLoader, RenderMode } from 'three.quarks'
 import { readUnityPackage } from '../src/unity-package'
@@ -263,9 +266,9 @@ describe('Unity package import', () => {
       expect(ps.startRotation).toMatchObject({
         type: 'Euler',
         eulerOrder: 'YXZ',
-        angleX: { value: 0.1 },
-        angleY: { value: -0.2 },
-        angleZ: { value: -0.3 },
+        angleX: { value: -0.1 },
+        angleY: { value: 0.2 },
+        angleZ: { value: Math.PI - 0.3 },
       })
       const rotation = ps.behaviors.find((b: any) => b.type === 'Rotation3DOverLife')
       expect(rotation.angularVelocity).toMatchObject({
@@ -291,6 +294,133 @@ describe('Unity package import', () => {
     expect(warnings.join('\n')).not.toContain('ClampVelocityModule is enabled but not converted')
     const separate = await load(text.replace('dampen: 0.6', 'separateAxis: 1\n    dampen: 0.6'))
     expect(separate.warnings.join('\n')).toContain('separate-axis limits are not converted')
+  })
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'preserves mesh start orientation with rotation3D=%s and worldSpace=%s without reflected emitter scale',
+    async (rotation3D, worldSpace) => {
+      const source = meshEntries()
+      const text = source.text
+        .replace('moveWithTransform: 1', `moveWithTransform: ${Number(!worldSpace)}`)
+        .replace(
+          'startRotation: {',
+          `rotation3D: ${Number(rotation3D)}\n    startRotationX: {scalar: 0.1}\n    startRotationY: {scalar: 0.2}\n    startRotation: {`,
+        )
+      delete source.entries[`${materialGuid}/asset`]
+      const { json } = await load(text, source.entries)
+      const group = new QuarksLoader().parse(json)
+      new Scene().add(group)
+      group.updateMatrixWorld(true)
+      const renderer = new BatchedRenderer()
+      const systems: ParticleSystem[] = []
+      group.traverse((node) => {
+        if ('system' in node) systems.push(node.system as ParticleSystem)
+      })
+      for (const system of systems) {
+        system.behaviors = []
+        renderer.addSystem(system)
+      }
+      try {
+        renderer.update(1 / 60)
+        const system = systems.find((s) => s.renderMode === RenderMode.Mesh)!
+        const expected = new Quaternion()
+          .setFromAxisAngle(new Vector3(0, 1, 0), Math.PI)
+          .multiply(
+            rotation3D
+              ? new Quaternion().setFromEuler(new Euler(0.1, -0.2, -0.3, 'YXZ'))
+              : new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), -0.3),
+          )
+        expect(system.emitter.matrixWorld.determinant()).toBeGreaterThan(0)
+        expect(system.particleNum).toBeGreaterThan(0)
+        const rotation = system.particles[0]!.rotation
+        if (typeof rotation !== 'object') throw new Error('Expected mesh particle quaternion')
+        const actual = new Quaternion(rotation.x, rotation.y, rotation.z, rotation.w)
+        if (!worldSpace) actual.premultiply(system.emitter.getWorldQuaternion(new Quaternion()))
+        expect(Math.abs(expected.dot(actual))).toBeCloseTo(1, 10)
+      } finally {
+        for (const system of systems) system.dispose()
+        renderer.dispose()
+      }
+    },
+  )
+
+  it.each([0, 2, 4, 10, 17])(
+    'preserves a partial emission arc and reflected forward axis for Unity shape %i',
+    async (type) => {
+      const text = prefab
+        .replace('type: 4\n    angle: 30', `type: ${type}\n    radiusThickness: 0\n    angle: 30`)
+        .replace('arc: {value: 180}', 'arc: {value: 90}')
+      const entries = packageEntries(text)
+      delete entries[`${materialGuid}/asset`]
+      const { json } = await load(text, entries)
+      const group = new QuarksLoader().parse(json)
+      new Scene().add(group)
+      group.updateMatrixWorld(true)
+      const renderer = new BatchedRenderer()
+      const systems: ParticleSystem[] = []
+      group.traverse((node) => {
+        if ('system' in node) systems.push(node.system as ParticleSystem)
+      })
+      for (const system of systems) renderer.addSystem(system)
+      try {
+        renderer.update(1 / 60)
+        const system = systems.find((s) => s.particleNum > 0)!
+        const particle = system.particles[0]!
+        const random = vi.spyOn(Math, 'random').mockReturnValue(0.37)
+        try {
+          system.emitterShape.initialize(particle, system.emissionState)
+        } finally {
+          random.mockRestore()
+        }
+        const position = new Vector3(
+          particle.position.x,
+          particle.position.y,
+          particle.position.z,
+        ).applyQuaternion(system.emitter.quaternion)
+        const velocity = new Vector3(
+          particle.velocity.x,
+          particle.velocity.y,
+          particle.velocity.z,
+        ).applyQuaternion(system.emitter.quaternion)
+        expect(position.x).toBeGreaterThan(0)
+        expect(position.y).toBeGreaterThan(0)
+        expect(Math.atan2(position.y, position.x)).toBeCloseTo((0.37 * Math.PI) / 2, 10)
+        if (type === 2 || type === 17) expect(position.z).toBeLessThan(0)
+        if (type === 4) expect(velocity.z).toBeLessThan(0)
+      } finally {
+        for (const system of systems) system.dispose()
+        renderer.dispose()
+      }
+    },
+  )
+
+  it('applies the mesh basis offset to random ranges and curve values, but not curve slopes', async () => {
+    const source = meshEntries()
+    const convert = async (rotation: string) => {
+      const { json } = await load(
+        source.text.replace(
+          'startRotation: {minMaxState: 0, scalar: 0.3}',
+          `rotation3D: 1\n    startRotation: ${rotation}`,
+        ),
+        source.entries,
+      )
+      return (json.object as any).children[0].children[1].ps.startRotation.angleZ
+    }
+    expect(await convert('{minMaxState: 3, scalar: 0.3, minScalar: -0.2}')).toEqual({
+      type: 'IntervalValue',
+      a: Math.PI - 0.3,
+      b: Math.PI + 0.2,
+    })
+    const curve = await convert(
+      '{minMaxState: 1, scalar: 0.3, maxCurve: {m_Curve: [{time: 0, value: 0, outSlope: 1}, {time: 1, value: 1, inSlope: 1}]}}',
+    )
+    for (let i = 0; i < 4; i++)
+      expect(curve.functions[0].function[`p${i}`]).toBeCloseTo(Math.PI - i * 0.1, 12)
   })
 
   it.each([
@@ -386,7 +516,7 @@ describe('Unity package import', () => {
     expect(ps.startLife).toEqual({ type: 'IntervalValue', a: 2, b: 3 })
     expect(ps.startRotation).toEqual({ type: 'ConstantValue', value: -0.3 })
     expect(ps.startColor.type).toBe('ColorRange')
-    expect(ps.shape).toMatchObject({ type: 'cone', radius: 0.25, arc: Math.PI })
+    expect(ps.shape).toMatchObject({ type: 'cone', radius: 0.25, arc: -Math.PI })
     expect(ps.shape.angle).toBeCloseTo(Math.PI / 6)
     expect(ps.emissionOverTime.value).toBe(20)
     expect(ps.emissionBursts[0]).toMatchObject({
@@ -454,6 +584,55 @@ describe('Unity package import', () => {
     for (const system of systems) system.dispose()
     renderer.dispose()
   })
+
+  it.each([
+    ['stretched rays', -6, 1.3, 1],
+    ['dust', -8, 3.3291566, 0],
+    ['outward particles', 4, 2, 0],
+  ])(
+    'keeps world-space %s velocity radial after handedness conversion and a JSON round trip',
+    async (_, speed, radius, mode) => {
+      const text = prefab
+        .replace('moveWithTransform: 1', 'moveWithTransform: 0')
+        .replace('type: 4\n    angle: 30', 'type: 0\n    radiusThickness: 0\n    angle: 30')
+        .replace('radius: {value: 0.25}', `radius: {value: ${radius}}`)
+        .replace('startSpeed: {minMaxState: 0, scalar: 4}', `startSpeed: {scalar: ${speed}}`)
+        .replace('m_RenderMode: 0', `m_RenderMode: ${mode}`)
+      const entries = packageEntries(text)
+      delete entries[`${materialGuid}/asset`]
+      const { json } = await load(text, entries)
+      prepareNativeDocument(json)
+      const group = new QuarksLoader().parse(JSON.parse(JSON.stringify(json)))
+      const renderer = new BatchedRenderer()
+      const systems: ParticleSystem[] = []
+      group.traverse((node) => {
+        if ('system' in node) systems.push(node.system as ParticleSystem)
+      })
+      new Scene().add(group)
+      for (const system of systems) renderer.addSystem(system)
+      group.updateMatrixWorld(true)
+      try {
+        renderer.update(1 / 60)
+        const system = systems.find((s) => s.worldSpace)!
+        const center = system.emitter.getWorldPosition(new Vector3())
+        expect(system.particleNum).toBeGreaterThan(0)
+        for (const particle of system.particles.slice(0, system.particleNum)) {
+          const radial = new Vector3(particle.position.x, particle.position.y, particle.position.z)
+            .sub(center)
+            .normalize()
+          const velocity = new Vector3(
+            particle.velocity.x,
+            particle.velocity.y,
+            particle.velocity.z,
+          ).normalize()
+          expect(radial.dot(velocity)).toBeCloseTo(Math.sign(speed), 8)
+        }
+      } finally {
+        for (const system of systems) system.dispose()
+        renderer.dispose()
+      }
+    },
+  )
 
   it('warns about missing and unsupported textures instead of fetching or dropping the prefab', async () => {
     const entries = packageEntries()

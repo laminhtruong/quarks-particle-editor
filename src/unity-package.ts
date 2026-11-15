@@ -243,16 +243,23 @@ function objects(asset: Asset): UnityObject[] {
 
 type Scalar = ConstantValue | IntervalValue | PiecewiseBezier
 
-function scalar(value: unknown, fallback: number, warn: Warn, label: string, factor = 1): Scalar {
+function scalar(
+  value: unknown,
+  fallback: number,
+  warn: Warn,
+  label: string,
+  factor = 1,
+  offset = 0,
+): Scalar {
   if (typeof value === 'number' || typeof value === 'bigint')
-    return new ConstantValue(number(value) * factor)
+    return new ConstantValue(number(value) * factor + offset)
   const data = record(value)
   const scale = number(data.scalar, fallback) * factor
   const mode = number(data.minMaxState)
-  if (mode === 0) return new ConstantValue(scale)
+  if (mode === 0) return new ConstantValue(scale + offset)
   if (mode === 3) {
     const other = number(data.minScalar, fallback) * factor
-    return new IntervalValue(Math.min(other, scale), Math.max(other, scale))
+    return new IntervalValue(Math.min(other, scale) + offset, Math.max(other, scale) + offset)
   }
   if (mode === 2)
     warn(`${label}: random between two curves is not supported; using the maximum curve.`)
@@ -260,14 +267,14 @@ function scalar(value: unknown, fallback: number, warn: Warn, label: string, fac
   const keys = array(record(data.maxCurve).m_Curve).map(record)
   if (!keys.length) {
     warn(`${label}: empty animation curve; using its scalar value.`)
-    return new ConstantValue(scale)
+    return new ConstantValue(scale + offset)
   }
   if (keys.some((key) => number(key.weightedMode) !== 0))
     warn(`${label}: weighted tangents are approximated with unweighted Hermite tangents.`)
   const points = keys
     .map((key) => ({
       time: number(key.time),
-      value: number(key.value) * scale,
+      value: number(key.value) * scale + offset,
       inSlope: Number(key.inSlope ?? 0) * scale,
       outSlope: Number(key.outSlope ?? 0) * scale,
     }))
@@ -382,7 +389,8 @@ function shape(value: unknown, warn: Warn): EmitterShape {
   const params = {
     radius,
     thickness,
-    arc: (number(arc.value, number(data.arc, 360)) * Math.PI) / 180,
+    // Reverse the shape's Y axis; the emitter half-turn then reflects only Z.
+    arc: (-number(arc.value, number(data.arc, 360)) * Math.PI) / 180,
     mode: number(arc.mode),
     spread: number(arc.spread),
     speed: scalar(arc.speed, 1, warn, 'Shape arc speed'),
@@ -683,8 +691,8 @@ async function convertPrefab(
       const initial = record(data.InitialModule),
         emission = record(data.EmissionModule),
         renderer = renderers.get(id) ?? {}
-      const value = (input: unknown, fallback: number, label: string, factor = 1) =>
-        scalar(input, fallback, localWarn, label, factor)
+      const value = (input: unknown, fallback: number, label: string, factor = 1, offset = 0) =>
+        scalar(input, fallback, localWarn, label, factor, offset)
       const mode = number(renderer.m_RenderMode)
       const geometry = mode === 4 ? await mesh(renderer.m_Mesh, localWarn) : undefined
       const renderMode = geometry
@@ -852,16 +860,22 @@ async function convertPrefab(
               value(initial.startSizeZ, 1, 'Start Size Z'),
             )
           : value(initial.startSize, 1, 'Start Size'),
-        // The emitter's Z reflection decomposes to a Y half-turn in Quarks mesh rendering.
-        startRotation:
-          geometry && enabled(initial.rotation3D)
+        // Preserve mesh orientation when replacing the reflected emitter with an X half-turn.
+        startRotation: geometry
+          ? enabled(initial.rotation3D)
             ? new EulerGenerator(
-                value(initial.startRotationX, 0, 'Start Rotation X'),
-                value(initial.startRotationY, 0, 'Start Rotation Y', -1),
-                value(initial.startRotation, 0, 'Start Rotation Z', -1),
+                value(initial.startRotationX, 0, 'Start Rotation X', -1),
+                value(initial.startRotationY, 0, 'Start Rotation Y'),
+                value(initial.startRotation, 0, 'Start Rotation Z', -1, Math.PI),
                 'YXZ',
               )
-            : value(initial.startRotation, 0, 'Start Rotation', -1),
+            : new EulerGenerator(
+                new ConstantValue(0),
+                value(initial.startRotation, 0, 'Start Rotation'),
+                new ConstantValue(Math.PI),
+                'YXZ',
+              )
+          : value(initial.startRotation, 0, 'Start Rotation', -1),
         startColor: color(initial.startColor, localWarn, 'Start Color'),
         emissionOverTime: activeEmission
           ? value(emission.rateOverTime ?? emission.rate, 10, 'Emission rate')
@@ -909,8 +923,8 @@ async function convertPrefab(
       system.emitter.visible = mode !== 5 && enabled(renderer.m_Enabled ?? 1)
       for (let ancestor: THREE.Object3D | null = parent; ancestor; ancestor = ancestor.parent)
         system.emitter.visible &&= ancestor.visible
-      // Reflect the source shape's forward +Z to -Z without changing its parent hierarchy.
-      system.emitter.scale.z = -1
+      // Negative emitter scale makes Quarks world-space positions and velocities disagree.
+      system.emitter.rotation.x = Math.PI
       parent.add(system.emitter)
     }
     root.userData.unityImport = {

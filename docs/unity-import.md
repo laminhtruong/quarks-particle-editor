@@ -70,6 +70,15 @@ Keep your original package.
 The editor preview uses a reference grid without a solid floor or depth writes,
 so particles below the grid remain visible. The grid is not included in exports.
 
+Shape handedness uses a reversed emission arc and an emitter half-turn, rather
+than negative emitter scale: Quarks 0.17.1 otherwise transforms world-space spawn
+positions and velocities inconsistently. Mesh start rotations compensate for
+this basis change. These remain stock Quarks shapes and generators on export.
+Previously imported JSON keeps its old conversion; reimport the original package
+to apply this correction (keep a backup of any edited effects).
+Stretched billboards use Quarks' native shader, whose velocity-based elongation
+is size-dependent and is not an exact match for Unity's stretch calculation.
+
 Mesh import uses Three.js's FBX/OBJ parsers, without loading model textures,
 material libraries, or external URLs. The prefab's particle material remains in
 use. Old `fileIDToRecycleName` and modern `internalIDToNameTable` metadata select
