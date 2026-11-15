@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DataTexture,
+  BoxGeometry,
   Group,
   GridHelper,
   Mesh,
@@ -45,12 +46,37 @@ vi.mock('three/examples/jsm/controls/OrbitControls.js', () => ({
     dispose = gpu.controlsDispose
   },
 }))
-vi.mock('three/examples/jsm/controls/TransformControls.js', () => ({
-  TransformControls: class {
+vi.mock('three/examples/jsm/controls/TransformControls.js', () => {
+  class TransformControls {
+    size = 1
     helper = new Group()
     listeners = new Map<string, (event: any) => void>()
     object: any
     constructor() {
+      const gizmo = new Group() as Group & {
+        isTransformControlsGizmo: true
+        gizmo: { translate: Group }
+        picker: { translate: Group }
+      }
+      gizmo.isTransformControlsGizmo = true
+      gizmo.gizmo = { translate: new Group() }
+      gizmo.picker = { translate: new Group() }
+      for (const axis of ['x', 'y', 'z'] as const) {
+        for (const sign of [-1, 1]) {
+          for (const group of [gizmo.gizmo.translate, gizmo.picker.translate]) {
+            const mesh = new Mesh(new BoxGeometry(), new MeshBasicMaterial())
+            mesh.name = axis.toUpperCase()
+            mesh.geometry.translate(
+              axis === 'x' ? sign * 0.5 : 0,
+              axis === 'y' ? sign * 0.5 : 0,
+              axis === 'z' ? sign * 0.5 : 0,
+            )
+            group.add(mesh)
+          }
+        }
+      }
+      gizmo.add(gizmo.gizmo.translate, gizmo.picker.translate)
+      this.helper.add(gizmo)
       gpu.transformControls = this
     }
     addEventListener(type: string, listener: (event: any) => void) {
@@ -71,8 +97,9 @@ vi.mock('three/examples/jsm/controls/TransformControls.js', () => ({
       this.listeners.get(type)?.(event)
     }
     dispose = vi.fn()
-  },
-}))
+  }
+  return { TransformControls }
+})
 
 class ElementStub {
   innerHTML = ''
@@ -500,6 +527,18 @@ describe('project-independent particle editor', () => {
     await editor.ready
     const gizmo = gpu.transformControls
     expect(gizmo.object).toBeInstanceOf(Group)
+    expect(gizmo.size).toBe(0.5)
+    const controlsGizmo = gizmo.helper.children[0]
+    for (const axis of ['X', 'Y', 'Z']) {
+      expect(
+        controlsGizmo.gizmo.translate.children.filter(
+          (handle: Mesh) => handle.name === axis && (handle.material as MeshBasicMaterial).visible,
+        ),
+      ).toHaveLength(1)
+      expect(
+        controlsGizmo.picker.translate.children.filter((handle: Mesh) => handle.name === axis),
+      ).toHaveLength(1)
+    }
     gizmo.dispatch('mouseDown')
     const movedGroup = gizmo.object
     movedGroup.position.set(2, 1, -3)

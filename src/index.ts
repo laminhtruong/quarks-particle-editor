@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
+import type { TransformControlsGizmo } from 'three/examples/jsm/controls/TransformControls.js'
 import {
   ApplyForce,
   BatchedRenderer,
@@ -1243,6 +1244,31 @@ export function createParticleEditor(
     controls.minDistance = 2
     controls.maxDistance = 35
     transformControls = new TransformControls(camera, canvas)
+    transformControls.size = 0.5
+    const gizmo = transformControls
+      .getHelper()
+      .children.find(
+        (child): child is TransformControlsGizmo =>
+          (child as TransformControlsGizmo).isTransformControlsGizmo,
+      )
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const negative = (handle: THREE.Object3D): boolean => {
+        const mesh = handle as THREE.Mesh
+        mesh.geometry.computeBoundingBox()
+        return (mesh.geometry.boundingBox?.getCenter(new THREE.Vector3())[axis] ?? 0) < 0
+      }
+      for (const handle of gizmo?.gizmo.translate.children ?? []) {
+        if (handle.name !== axis.toUpperCase() || !negative(handle)) continue
+        const mesh = handle as THREE.Mesh
+        mesh.material = (mesh.material as THREE.Material).clone()
+        mesh.material.visible = false
+      }
+      for (const handle of [...(gizmo?.picker.translate.children ?? [])]) {
+        if (handle.name !== axis.toUpperCase() || !negative(handle)) continue
+        gizmo!.picker.translate.remove(handle)
+        ;(handle as THREE.Mesh).geometry.dispose()
+      }
+    }
     transformControls.addEventListener('dragging-changed', (event) => {
       controls.enabled = !event.value
     })
