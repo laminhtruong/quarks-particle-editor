@@ -865,7 +865,26 @@ describe('Unity package import', () => {
     expect(result.warnings.join('\n')).toContain('random constants')
     expect(result.warnings.join('\n')).toContain('Start delay')
     const emitter = (result.json.object as any).children[0].children[1]
+    expect(emitter.ps.emissionBursts[0].time).toBe(2.5)
     expect(emitter.ps.behaviors[1].size.type).toBe('PiecewiseBezier')
+  })
+
+  it('delays burst-only systems without warning, while preserving zero-rate emissions', async () => {
+    const text = prefab
+      .replace('lengthInSec: 4', 'lengthInSec: 4\n  startDelay: {minMaxState: 0, scalar: 0.25}')
+      .replace(
+        'rateOverTime: {minMaxState: 0, scalar: 20}',
+        'rateOverTime: {minMaxState: 0, scalar: 0}',
+      )
+      .replace(
+        'rateOverDistance: {minMaxState: 0, scalar: 2}',
+        'rateOverDistance: {minMaxState: 0, scalar: 0}',
+      )
+    const { json, warnings } = await load(text)
+    const emitter = (json.object as any).children[0].children[1]
+    expect(emitter.ps.emissionBursts[0].time).toBe(0.75)
+    expect(emitter.ps.emissionOverTime.value).toBe(0)
+    expect(warnings.join('\n')).not.toContain('Start delay')
   })
 
   it.each([

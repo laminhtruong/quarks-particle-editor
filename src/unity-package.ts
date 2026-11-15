@@ -705,7 +705,10 @@ async function convertPrefab(
       const localWarn: Warn = (message) => warn(`${label}: ${message}`)
       const initial = record(data.InitialModule),
         emission = record(data.EmissionModule),
+        startDelay = record(data.startDelay),
         renderer = renderers.get(id) ?? {}
+      const delayMode = number(startDelay.minMaxState)
+      const delay = delayMode === 0 ? Math.max(0, number(startDelay.scalar)) : 0
       const value = (input: unknown, fallback: number, label: string, factor = 1, offset = 0) =>
         scalar(input, fallback, localWarn, label, factor, offset)
       const mode = number(renderer.m_RenderMode)
@@ -842,11 +845,19 @@ async function convertPrefab(
       if (number(data.simulationSpeed, 1) !== 1) localWarn('Simulation speed is not converted.')
       if (fileId(data.moveWithCustomTransform) !== '0')
         localWarn('Custom simulation-space transform is not converted.')
+      if (delayMode !== 0) localWarn('Random/curve start delay is not converted.')
       if (
-        number(record(data.startDelay).scalar) !== 0 ||
-        number(record(data.startDelay).minMaxState) !== 0
+        delay > 0 &&
+        enabled(emission.enabled) &&
+        ['rateOverTime', 'rateOverDistance'].some((key) => {
+          const input =
+            key === 'rateOverTime' ? (emission.rateOverTime ?? emission.rate) : emission[key]
+          if (typeof input === 'number') return input !== 0
+          const rate = record(input)
+          return number(rate.minMaxState) !== 0 || number(rate.scalar) !== 0
+        })
       )
-        localWarn('Start delay is not converted.')
+        localWarn('Start delay: continuous emission starts immediately; only bursts are delayed.')
       if (!geometry && enabled(initial.rotation3D))
         localWarn('3D start rotation is approximated by its Z component.')
       if (number(initial.gravityModifier) || number(record(initial.gravityModifier).scalar))
@@ -902,7 +913,7 @@ async function convertPrefab(
           ? array(emission.m_Bursts).map((burst) => {
               const b = record(burst)
               return {
-                time: number(b.time),
+                time: number(b.time) + delay,
                 count: b.countCurve
                   ? value(b.countCurve, 1, 'Burst count')
                   : new IntervalValue(number(b.minCount, 1), number(b.maxCount, 1)),
