@@ -409,6 +409,27 @@ export function renderProperty(
     path[0] === 'ps' &&
     ['startLife', 'startSpeed', 'startSize', 'startRotation'].includes(key) &&
     scalarTypes.includes(type)
+  const compactStartColor = path.length === 2 && path[0] === 'ps' && key === 'startColor'
+  const rgb = ['r', 'g', 'b'].every((channel) => typeof object[channel] === 'number')
+  const rgba = `rgba(${['r', 'g', 'b'].map((channel) => Math.round(Math.max(0, Math.min(1, Number(object[channel]))) * 255)).join(',')},${Math.max(0, Math.min(1, Number(object.a ?? 1)))})`
+  if (rgb)
+    return `<button class="native-color-swatch" type="button" aria-label="Edit ${escape(label)} color" style="--swatch:${rgba}" data-native-action="edit-color" data-native-path="${attr(path)}"></button>`
+  if (type === 'Gradient') {
+    const color = object.color as NativeRecord
+    const keys = color?.keys as { value: NativeRecord; pos: number }[] | undefined
+    const gradient = keys?.length
+      ? `linear-gradient(90deg,${keys.map((item) => `rgb(${['r', 'g', 'b'].map((channel) => Math.round(Math.max(0, Math.min(1, Number(item.value[channel]))) * 255)).join(' ')}) ${Math.max(0, Math.min(1, item.pos)) * 100}%`).join(',')})`
+      : 'linear-gradient(90deg,#fff,#000)'
+    const button = `<button class="native-gradient-swatch" type="button" aria-label="Edit ${escape(label)} gradient" style="background:${gradient}" data-native-action="edit-gradient" data-native-path="${attr(path)}"></button>`
+    if (compactStartColor) {
+      const mode = `<select class="native-generator-mode" aria-label="${escape(label)} mode" data-native-action="generator" data-native-path="${attr(path)}">${options(
+        generatorChoices(path, owner).map((item) => [item, propertyLabel(item)]),
+        type,
+      )}</select>`
+      return `<div class="native-generator"><div class="native-generator-head"><span class="native-generator-label">${escape(label)}</span>${button}${mode}</div></div>`
+    }
+    return button
+  }
   let typeControl = ''
   if (Object.hasOwn(generatorTemplates, type)) {
     const choices = generatorChoices(path, owner)
@@ -433,23 +454,6 @@ export function renderProperty(
       .join(' ')
     preview = `<svg class="native-curve" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Bezier curve preview"><polyline points="${points}"/></svg><p class="hint">Cubic control values P0-P3; segment starts use normalized lifetime. Native angles use radians.</p>`
   }
-  if (type === 'Gradient') {
-    const color = object.color as NativeRecord
-    const keys = color?.keys as
-      { value: { r: number; g: number; b: number }; pos: number }[] | undefined
-    if (keys?.length)
-      preview = `<div class="native-gradient" role="img" aria-label="Color gradient preview" style="background:linear-gradient(to right,${keys.map((item) => `rgb(${Math.round(item.value.r * 255)},${Math.round(item.value.g * 255)},${Math.round(item.value.b * 255)}) ${item.pos * 100}%`).join(',')})"></div>`
-  }
-  const color = ['r', 'g', 'b'].every((channel) => typeof object[channel] === 'number')
-  const swatch = color
-    ? `<label class="field"><span>Color</span><input type="color" value="#${['r', 'g', 'b']
-        .map((channel) =>
-          Math.round(Math.max(0, Math.min(1, Number(object[channel]))) * 255)
-            .toString(16)
-            .padStart(2, '0'),
-        )
-        .join('')}" data-native-color="${attr(path)}"></label>`
-    : ''
   if (compactStartScalar) {
     const labels: Record<string, string> = {
       ConstantValue: 'Constant',
@@ -474,7 +478,18 @@ export function renderProperty(
       .join('')
     return `<div class="native-generator"><div class="native-generator-head"><span class="native-generator-label">${escape(label)}</span>${values}${mode}</div>${type === 'PiecewiseBezier' ? `${preview}${fields}` : ''}</div>`
   }
-  return `<fieldset class="native-group"><legend>${escape(label)}</legend>${typeControl}${preview}${swatch}${Object.entries(
+  if (compactStartColor && colorTypes.includes(type)) {
+    const mode = `<select class="native-generator-mode" aria-label="${escape(label)} mode" data-native-action="generator" data-native-path="${attr(path)}">${options(
+      generatorChoices(path, owner).map((item) => [item, propertyLabel(item)]),
+      type,
+    )}</select>`
+    const values = Object.entries(object)
+      .filter(([name]) => !['type', 'uuid', 'metadata', 'subType'].includes(name))
+      .map(([name, item]) => renderProperty(item, [...path, name], context, object))
+      .join('')
+    return `<div class="native-generator"><div class="native-generator-head"><span class="native-generator-label">${escape(label)}</span>${values}${mode}</div></div>`
+  }
+  return `<fieldset class="native-group"><legend>${escape(label)}</legend>${typeControl}${preview}${Object.entries(
     object,
   )
     .filter(([name]) => !['type', 'uuid', 'metadata', 'subType'].includes(name))

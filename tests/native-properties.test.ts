@@ -130,6 +130,23 @@ describe('installed Quarks catalog', () => {
     expect(curve).toContain('Bezier curve preview')
   })
 
+  it('opens color and gradient generators through dedicated editors', () => {
+    const color = renderProperty(generatorTemplates.ConstantColor!(), ['ps', 'startColor'], context)
+    expect(color).toContain('data-native-action="edit-color"')
+    expect(color).toContain('Start Color')
+    expect(color).not.toContain('data-native-kind="number"')
+    const gradient = renderProperty(generatorTemplates.Gradient!(), ['ps', 'startColor'], context)
+    expect(gradient).toContain('data-native-action="edit-gradient"')
+    expect(gradient).toContain('Start Color')
+    expect(gradient).not.toContain('native-group')
+    const randomGradient = renderProperty(
+      generatorTemplates.RandomColorBetweenGradient!(),
+      ['ps', 'startColor'],
+      context,
+    )
+    expect(randomGradient.match(/data-native-action="edit-gradient"/g)).toHaveLength(2)
+  })
+
   it('uses all burst parameters and permits multiple bursts', () => {
     const node = { ps: { emissionBursts: [] } }
     appendNativeItem(node, ['ps', 'emissionBursts'])

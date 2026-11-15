@@ -198,6 +198,7 @@ export function createParticleEditor(
   const undoStack: EffectFile[] = []
   const redoStack: EffectFile[] = []
   const collapsedModules = new Set<string>()
+  let colorEditor: { path: NativePath; type: 'color' | 'gradient'; value: NativeRecord } | undefined
 
   const currentEffect = (): EffectFile | undefined =>
     effects.find((effect) => effect.id === currentId)
@@ -225,6 +226,52 @@ export function createParticleEditor(
       number,
       number,
     ]
+
+  function editorColorHex(color: NativeRecord): string {
+    return asHex(['r', 'g', 'b'].map((key) => Number(color[key] ?? 0)))
+  }
+
+  function editorRgba(color: NativeRecord): string {
+    return `rgba(${['r', 'g', 'b'].map((key) => Math.round(Math.max(0, Math.min(1, Number(color[key] ?? 0))) * 255)).join(',')},${Math.max(0, Math.min(1, Number(color.a ?? 1)))})`
+  }
+
+  function editorGradientCss(value: NativeRecord): string {
+    const color = value.color as NativeRecord
+    const alpha = value.alpha as NativeRecord
+    const colors = (color.keys ?? []) as NativeRecord[]
+    const alphas = (alpha.keys ?? []) as NativeRecord[]
+    const alphaAt = (pos: number) => {
+      const next = alphas.findIndex((key) => Number(key.pos) >= pos)
+      if (next <= 0) return Number(alphas[Math.max(0, next)]?.value ?? 1)
+      if (next < 0) return Number(alphas.at(-1)?.value ?? 1)
+      const before = alphas[next - 1]!
+      const after = alphas[next]!
+      const span = Number(after.pos) - Number(before.pos)
+      return (
+        Number(before.value) +
+        (Number(after.value) - Number(before.value)) *
+          (span ? (pos - Number(before.pos)) / span : 0)
+      )
+    }
+    return `linear-gradient(90deg,${
+      colors
+        .map((key) => {
+          const rgb = key.value as NativeRecord
+          return `rgba(${['r', 'g', 'b'].map((channel) => Math.round(Math.max(0, Math.min(1, Number(rgb[channel] ?? 0))) * 255)).join(',')},${Math.max(0, Math.min(1, alphaAt(Number(key.pos))))}) ${Math.max(0, Math.min(1, Number(key.pos))) * 100}%`
+        })
+        .join(',') || 'transparent,transparent'
+    })`
+  }
+
+  function colorEditorMarkup(): string {
+    if (!colorEditor) return ''
+    const { type, value } = colorEditor
+    const contents =
+      type === 'color'
+        ? `<div class="color-editor-picker"><input type="color" value="${editorColorHex(value)}" aria-label="Color" data-editor-color="hex"><div class="color-editor-sample" style="--swatch:${editorRgba(value)}" role="img" aria-label="Color with alpha preview"></div><div class="color-editor-channels">${['r', 'g', 'b'].map((channel) => `<label>${channel.toUpperCase()}<input type="number" min="0" max="255" step="1" value="${Math.round(Math.max(0, Math.min(1, Number(value[channel] ?? 0))) * 255)}" data-editor-color="${channel}"></label>`).join('')}<label>A<input type="number" min="0" max="255" step="1" value="${Math.round(Math.max(0, Math.min(1, Number(value.a ?? 1))) * 255)}" data-editor-color="alpha"></label></div><label class="color-editor-alpha">Alpha<input type="range" min="0" max="255" step="1" value="${Math.round(Math.max(0, Math.min(1, Number(value.a ?? 1))) * 255)}" data-editor-color="alpha"></label></div>`
+        : `<div class="gradient-editor-preview" style="background:${editorGradientCss(value)}"></div><section class="gradient-editor-section"><header><strong>Color</strong><button class="btn small" type="button" data-native-action="gradient-add" data-editor-part="color">+ Key</button></header>${((value.color as NativeRecord).keys as NativeRecord[]).map((key, index) => `<div class="gradient-editor-row"><input type="number" min="0" max="1" step="0.01" value="${num(Number(key.pos), 3)}" aria-label="Color key position" data-editor-stop="color" data-editor-index="${index}" data-editor-field="pos"><input type="color" value="${editorColorHex(key.value as NativeRecord)}" aria-label="Color key color" data-editor-stop="color" data-editor-index="${index}" data-editor-field="color"><button class="btn small danger" type="button" aria-label="Remove color key" data-native-action="gradient-remove" data-editor-part="color" data-editor-index="${index}" ${((value.color as NativeRecord).keys as NativeRecord[]).length <= 2 ? 'disabled' : ''}>&times;</button></div>`).join('')}</section><section class="gradient-editor-section"><header><strong>Alpha</strong><button class="btn small" type="button" data-native-action="gradient-add" data-editor-part="alpha">+ Key</button></header>${((value.alpha as NativeRecord).keys as NativeRecord[]).map((key, index) => `<div class="gradient-editor-row"><input type="number" min="0" max="1" step="0.01" value="${num(Number(key.pos), 3)}" aria-label="Alpha key position" data-editor-stop="alpha" data-editor-index="${index}" data-editor-field="pos"><input type="number" min="0" max="1" step="0.01" value="${num(Number(key.value), 3)}" aria-label="Alpha value" data-editor-stop="alpha" data-editor-index="${index}" data-editor-field="value"><button class="btn small danger" type="button" aria-label="Remove alpha key" data-native-action="gradient-remove" data-editor-part="alpha" data-editor-index="${index}" ${((value.alpha as NativeRecord).keys as NativeRecord[]).length <= 2 ? 'disabled' : ''}>&times;</button></div>`).join('')}</section>`
+    return `<dialog class="color-editor-dialog"><header><strong>${type === 'color' ? 'Color' : 'Gradient'}</strong><button class="btn small" type="button" aria-label="Close" data-native-action="color-editor-cancel">&times;</button></header><div class="color-editor-body">${contents}</div><footer><button class="btn" type="button" data-native-action="color-editor-cancel">Cancel</button><button class="btn primary" type="button" data-native-action="color-editor-apply">Apply</button></footer></dialog>`
+  }
 
   function emitterNodes(rootNode: NativeNode): NativeNode[] {
     const found: NativeNode[] = []
@@ -539,6 +586,69 @@ export function createParticleEditor(
   function nativeAction(target: HTMLElement): void {
     const action = target.dataset.nativeAction
     const path = JSON.parse(target.dataset.nativePath ?? '[]') as NativePath
+    if (action === 'edit-color' || action === 'edit-gradient') {
+      const effect = currentEffect()
+      if (!effect) return
+      const value = getNativeValue(
+        { ...nativeNode(effect.json, systemIndex), document: effect.json },
+        path,
+      )
+      if (!value || typeof value !== 'object') return
+      colorEditor = {
+        path,
+        type: action === 'edit-color' ? 'color' : 'gradient',
+        value: structuredClone(value as NativeRecord),
+      }
+      renderInspector()
+      return
+    }
+    if (action === 'color-editor-cancel') {
+      colorEditor = undefined
+      renderInspector()
+      return
+    }
+    if (action === 'gradient-add' || action === 'gradient-remove') {
+      if (colorEditor?.type !== 'gradient') return
+      const part = target.dataset.editorPart === 'alpha' ? 'alpha' : 'color'
+      const keys = ((colorEditor.value[part] as NativeRecord).keys ?? []) as NativeRecord[]
+      if (action === 'gradient-remove') {
+        if (keys.length > 2) keys.splice(Number(target.dataset.editorIndex), 1)
+      } else {
+        let start = 0
+        let span = 0
+        for (let index = 0; index < keys.length; index++) {
+          const gap = Number(keys[index + 1]?.pos ?? 1) - Number(keys[index]!.pos)
+          if (gap > span) {
+            start = index
+            span = gap
+          }
+        }
+        if (span <= 0.001) return
+        const source = keys[start]!
+        const key = {
+          ...structuredClone(source),
+          pos: (Number(source.pos) + Number(keys[start + 1]?.pos ?? 1)) / 2,
+        }
+        keys.splice(start + 1, 0, key)
+      }
+      renderInspector()
+      return
+    }
+    if (action === 'color-editor-apply') {
+      if (!colorEditor) return
+      const editor = colorEditor
+      colorEditor = undefined
+      if (editor.type === 'gradient') {
+        for (const part of ['color', 'alpha'])
+          ((editor.value[part] as NativeRecord).keys as NativeRecord[]).sort(
+            (a, b) => Number(a.pos) - Number(b.pos),
+          )
+      }
+      commitNativeEdit((node, json) =>
+        setNativeValue({ ...node, document: json }, editor.path, editor.value),
+      )
+      return
+    }
     commitNativeEdit((node, json) => {
       const root = { ...node, document: json }
       if (action?.startsWith('behavior-')) {
@@ -565,14 +675,7 @@ export function createParticleEditor(
         setNativeValue(root, path, generatorTemplates[type]!())
       } else if (action === 'shape')
         setNativeValue(root, path, newShape((target as HTMLSelectElement).value))
-      else if (target.dataset.nativeColor) {
-        const colorPath = JSON.parse(target.dataset.nativeColor) as NativePath
-        const color = getNativeValue(root, colorPath) as NativeRecord
-        const rgb = fromHex((target as HTMLInputElement).value)
-        ;['r', 'g', 'b'].forEach((key, index) => {
-          color[key] = rgb[index]
-        })
-      } else {
+      else {
         const input = target as HTMLInputElement
         const value =
           input.dataset.nativeKind === 'number'
@@ -731,13 +834,18 @@ export function createParticleEditor(
     <section class="inspect-section"><h3>Color over lifetime</h3>${renderColorStops(system)}</section>
     <section class="inspect-section"><h3>Texture sheet</h3>${renderProperties(ps, ['uTileCount', 'vTileCount', 'startTileIndex', 'blendTiles'], context)}<p class="hint">Add Frame Over Life in Behaviors to animate frames.</p></section>
     <section class="inspect-section"><details class="native-json"><summary>Native Quarks JSON</summary><textarea spellcheck="false" aria-label="Native Quarks JSON" data-native-json>${esc(JSON.stringify(effect.json, null, 2))}</textarea><button class="btn small" type="button" data-action="apply-json">Apply document</button></details></section>
-    <section class="inspect-section"><button class="btn danger small" type="button" data-action="delete-effect" ${isBuiltIn(effect.id) || (savedIds.has(effect.id) && !options.deleteEffect) ? 'disabled' : ''}>Delete effect</button>${isBuiltIn(effect.id) && options.deleteEffect ? '<button class="btn small" type="button" data-action="reset-effect">Reset to project default</button>' : ''}</section>`
+    <section class="inspect-section"><button class="btn danger small" type="button" data-action="delete-effect" ${isBuiltIn(effect.id) || (savedIds.has(effect.id) && !options.deleteEffect) ? 'disabled' : ''}>Delete effect</button>${isBuiltIn(effect.id) && options.deleteEffect ? '<button class="btn small" type="button" data-action="reset-effect">Reset to project default</button>' : ''}</section>${colorEditorMarkup()}`
     inspector.innerHTML = markup.replace(
       /<section class="inspect-section"><h3>([^<]+)<\/h3>([\s\S]*?)<\/section>/g,
       (_match, title: string, content: string) =>
         `<details class="particle-module" data-module="${esc(title)}" ${collapsedModules.has(title) ? '' : 'open'}><summary>${esc(title)}</summary><div class="module-body">${content}</div></details>`,
     )
     if (curve) drawCurve($<SVGSVGElement>('[data-curve]'), curve)
+    if (colorEditor) {
+      const dialog = inspector.querySelector<HTMLDialogElement>('.color-editor-dialog')
+      dialog?.addEventListener('cancel', () => (colorEditor = undefined), { once: true })
+      dialog?.showModal()
+    }
   }
 
   function renderTextures(): void {
@@ -1939,7 +2047,64 @@ export function createParticleEditor(
     (event) => {
       const target = event.target
       if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) {
-        if (target.dataset.bind) writeBound(target)
+        if (
+          target instanceof HTMLInputElement &&
+          target.dataset.editorColor &&
+          colorEditor?.type === 'color'
+        ) {
+          const color = colorEditor.value
+          if (target.dataset.editorColor === 'hex') {
+            const rgb = fromHex(target.value)
+            ;['r', 'g', 'b'].forEach((key, index) => (color[key] = rgb[index]))
+          } else if (target.dataset.editorColor === 'alpha') {
+            color.a = Math.max(0, Math.min(255, Number(target.value))) / 255
+          } else {
+            color[target.dataset.editorColor] =
+              Math.max(0, Math.min(255, Number(target.value))) / 255
+          }
+          const dialog = target.closest('dialog')!
+          dialog.querySelector<HTMLInputElement>('[data-editor-color="hex"]')!.value =
+            editorColorHex(color)
+          for (const channel of ['r', 'g', 'b'])
+            dialog.querySelector<HTMLInputElement>(`[data-editor-color="${channel}"]`)!.value =
+              String(Math.round(Number(color[channel]) * 255))
+          for (const alpha of dialog.querySelectorAll<HTMLInputElement>(
+            '[data-editor-color="alpha"]',
+          ))
+            alpha.value = String(Math.round(Number(color.a) * 255))
+          dialog
+            .querySelector<HTMLElement>('.color-editor-sample')!
+            .style.setProperty('--swatch', editorRgba(color))
+        } else if (
+          target instanceof HTMLInputElement &&
+          target.dataset.editorStop &&
+          colorEditor?.type === 'gradient'
+        ) {
+          const keys = ((colorEditor.value[target.dataset.editorStop] as NativeRecord).keys ??
+            []) as NativeRecord[]
+          const key = keys[Number(target.dataset.editorIndex)]
+          if (!key) return
+          if (target.dataset.editorField === 'color') {
+            const rgb = fromHex(target.value)
+            const value = key.value as NativeRecord
+            ;['r', 'g', 'b'].forEach((channel, index) => (value[channel] = rgb[index]))
+          } else if (target.dataset.editorField === 'value')
+            key.value = Math.max(0, Math.min(1, Number(target.value)))
+          else {
+            const index = Number(target.dataset.editorIndex)
+            const previous = Number(keys[index - 1]?.pos ?? 0)
+            const next = Number(keys[index + 1]?.pos ?? 1)
+            key.pos = Math.max(
+              previous + (index ? 0.001 : 0),
+              Math.min(next - (index < keys.length - 1 ? 0.001 : 0), Number(target.value)),
+            )
+            target.value = String(key.pos)
+          }
+          const preview = target
+            .closest('dialog')
+            ?.querySelector<HTMLElement>('.gradient-editor-preview')
+          if (preview) preview.style.background = editorGradientCss(colorEditor.value)
+        } else if (target.dataset.bind) writeBound(target)
         else if (target instanceof HTMLInputElement && target.dataset.colorStop !== undefined) {
           const system = currentEmitter()?.system
           const stops = system && colorStops(system)
@@ -1987,7 +2152,7 @@ export function createParticleEditor(
           })
         return
       }
-      if (target.dataset.nativePath || target.dataset.nativeColor || target.dataset.nativeAction) {
+      if (target.dataset.nativePath || target.dataset.nativeAction) {
         nativeAction(target)
         return
       }

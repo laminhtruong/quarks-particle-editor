@@ -637,6 +637,7 @@ button.hierarchy-row:hover {
   padding: 0;
   appearance: auto;
   font-size: 0;
+  grid-column: 4;
 }
 .native-generator-mode option {
   color: var(--text);
@@ -645,6 +646,151 @@ button.hierarchy-row:hover {
 }
 .native-generator-value.constant {
   grid-column: 2 / 4;
+}
+.native-color-swatch,
+.native-gradient-swatch {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 21px;
+  border: 1px solid #202020;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.native-color-swatch {
+  background-color: #292929;
+  background-image: linear-gradient(var(--swatch), var(--swatch));
+  grid-column: 2 / 4;
+}
+.native-generator-head > .native-color-swatch {
+  grid-column: auto;
+}
+.native-gradient-swatch {
+  margin: 4px 0;
+}
+.native-generator-head > .native-gradient-swatch {
+  grid-column: auto;
+  margin: 0;
+}
+.color-editor-dialog {
+  width: min(440px, calc(100vw - 24px));
+  max-height: min(80vh, 720px);
+  padding: 0;
+  overflow: auto;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid #555;
+  border-radius: 5px;
+  box-shadow: 0 12px 40px #0009;
+}
+.color-editor-dialog::backdrop {
+  background: #0009;
+}
+.color-editor-dialog > header,
+.color-editor-dialog > footer,
+.gradient-editor-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg);
+}
+.color-editor-body {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.color-editor-picker {
+  display: grid;
+  grid-template-columns: 64px 52px minmax(0, 1fr);
+  gap: 10px;
+}
+.color-editor-picker > input[type='color'] {
+  width: 64px;
+  height: 64px;
+  padding: 3px;
+  grid-row: span 2;
+}
+.color-editor-sample {
+  width: 52px;
+  height: 52px;
+  border: 1px solid #222;
+  background-color: #888;
+  background-image:
+    linear-gradient(var(--swatch), var(--swatch)),
+    linear-gradient(45deg, #777 25%, transparent 25%),
+    linear-gradient(-45deg, #777 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #777 75%),
+    linear-gradient(-45deg, transparent 75%, #777 75%);
+  background-size:
+    auto,
+    12px 12px,
+    12px 12px,
+    12px 12px,
+    12px 12px;
+  background-position:
+    0 0,
+    0 0,
+    0 6px,
+    6px -6px,
+    -6px 0;
+}
+.color-editor-channels {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  grid-column: 3;
+}
+.color-editor-channels label,
+.color-editor-alpha {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.color-editor-alpha {
+  grid-column: 1 / -1;
+  grid-template-columns: 42px 1fr;
+  align-items: center;
+}
+.color-editor-dialog > footer {
+  justify-content: flex-end;
+}
+.gradient-editor-preview {
+  height: 42px;
+  border: 1px solid #222;
+  background-color: #888;
+  background-image:
+    linear-gradient(45deg, #777 25%, transparent 25%),
+    linear-gradient(-45deg, #777 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #777 75%),
+    linear-gradient(-45deg, transparent 75%, #777 75%);
+  background-size: 12px 12px;
+  background-position:
+    0 0,
+    0 6px,
+    6px -6px,
+    -6px 0;
+}
+.gradient-editor-section {
+  border: 1px solid #555;
+  border-radius: 3px;
+}
+.gradient-editor-section > header {
+  padding: 5px 7px;
+}
+.gradient-editor-row {
+  display: grid;
+  grid-template-columns: minmax(64px, 0.7fr) minmax(80px, 1fr) 28px;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 7px;
+}
+.gradient-editor-row input[type='color'] {
+  width: 100%;
+  height: 24px;
+  padding: 1px;
 }
 .native-group {
   min-width: 0;
@@ -682,11 +828,6 @@ button.hierarchy-row:hover {
   stroke: #82d17a;
   stroke-width: 1.5;
   vector-effect: non-scaling-stroke;
-}
-.native-gradient {
-  height: 20px;
-  border: 1px solid #222;
-  margin: 5px 0;
 }
 .behavior-module {
   margin-bottom: 8px;
