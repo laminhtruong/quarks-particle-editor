@@ -79,6 +79,13 @@ to apply this correction (keep a backup of any edited effects).
 Stretched billboards use Quarks' native shader, whose velocity-based elongation
 is size-dependent and is not an exact match for Unity's stretch calculation.
 
+Billboard Edge (`SingleSidedEdge`, type 12) emission uses a native one-row grid
+across `[-radius, radius]`, with 24-bit position quantization and the emitter basis
+rotated so start speed follows Unity's local +Y direction. It stays compatible
+with stock Quarks loading, editing and export. Edge traversal modes/spread are
+approximated by random sampling with a warning; Edge with mesh rendering remains
+unsupported and warns before falling back to point emission.
+
 Mesh import uses Three.js's FBX/OBJ parsers, without loading model textures,
 material libraries, or external URLs. The prefab's particle material remains in
 use. Old `fileIDToRecycleName` and modern `internalIDToNameTable` metadata select

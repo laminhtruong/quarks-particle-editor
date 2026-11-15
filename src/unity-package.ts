@@ -12,6 +12,7 @@ import {
   EulerGenerator,
   FrameOverLife,
   Gradient,
+  GridEmitter,
   HemisphereEmitter,
   IntervalValue,
   LimitSpeedOverLife,
@@ -378,7 +379,7 @@ function lifetimeColor(value: unknown, warn: Warn): FunctionColorGenerator {
   return flat(generator.genColor([], new QVector4()))
 }
 
-function shape(value: unknown, warn: Warn): EmitterShape {
+function shape(value: unknown, warn: Warn, mesh: boolean): EmitterShape {
   const data = record(value)
   if (!enabled(data.enabled)) return new PointEmitter()
   const type = number(data.type)
@@ -418,6 +419,12 @@ function shape(value: unknown, warn: Warn): EmitterShape {
     return new ConeEmitter({ ...params, angle: (number(data.angle, 25) * Math.PI) / 180 })
   }
   if ([10, 11].includes(type)) return new CircleEmitter(params)
+  if (type === 12 && !mesh) {
+    if (number(record(data.radius).mode) || number(record(data.radius).spread))
+      warn('Shape: Edge traversal modes and spread are approximated by random emission.')
+    // shortcut: native grid quantizes a uniform line to 24 bits; use a custom shape if finer precision is required.
+    return new GridEmitter({ width: 2 * radius, height: 0, row: 1, column: 2 ** 24 })
+  }
   if (type === 17)
     return new DonutEmitter({ ...params, donutRadius: number(data.donutRadius, 0.2) })
   if ([5, 15, 16, 18].includes(type)) {
@@ -858,7 +865,7 @@ async function convertPrefab(
         looping: enabled(data.looping),
         prewarm: enabled(data.prewarm),
         worldSpace: !enabled(data.moveWithTransform ?? 1),
-        shape: shape(data.ShapeModule, localWarn),
+        shape: shape(data.ShapeModule, localWarn, !!geometry),
         startLife: value(initial.startLifetime, 5, 'Start Lifetime'),
         startSpeed: value(initial.startSpeed, 5, 'Start Speed'),
         startSize: enabled(initial.size3D)
@@ -933,6 +940,13 @@ async function convertPrefab(
         system.emitter.visible &&= ancestor.visible
       // Negative emitter scale makes Quarks world-space positions and velocities disagree.
       system.emitter.rotation.x = Math.PI
+      // Unity Edge emits along +Y, while the native grid emits along +Z.
+      if (
+        !geometry &&
+        enabled(record(data.ShapeModule).enabled) &&
+        number(record(data.ShapeModule).type) === 12
+      )
+        system.emitter.rotation.x = -Math.PI / 2
       parent.add(system.emitter)
     }
     root.userData.unityImport = {

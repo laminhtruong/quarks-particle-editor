@@ -450,6 +450,110 @@ describe('Unity package import', () => {
     },
   )
 
+  it.each([
+    [0.5, 0.25, true],
+    [2, -3, false],
+  ])(
+    'preserves Edge radius %s and upward speed %s (world space: %s) through folder export',
+    async (radius, speed, worldSpace) => {
+      const text = prefab
+        .replace('type: 4\n    angle: 30', 'type: 12\n    angle: 30')
+        .replace('radius: {value: 0.25}', `radius: {value: ${radius}}`)
+        .replace('startSpeed: {minMaxState: 0, scalar: 4}', `startSpeed: {scalar: ${speed}}`)
+        .replace('moveWithTransform: 1', `moveWithTransform: ${worldSpace ? 0 : 1}`)
+      const entries = packageEntries(text)
+      delete entries[`${materialGuid}/asset`]
+      const { json, warnings } = await load(text, entries)
+      expect(warnings.join('\n')).not.toContain('unsupported')
+      const bundle = await prepareFolderExport(json, 'https://game.test/')
+      prepareNativeDocument(bundle.json)
+      validateNative(bundle.json)
+      const group = new QuarksLoader().parse(JSON.parse(JSON.stringify(bundle.json)))
+      new Scene().add(group)
+      group.updateMatrixWorld(true)
+      const renderer = new BatchedRenderer()
+      const systems: ParticleSystem[] = []
+      group.traverse((node) => {
+        if ('system' in node) systems.push(node.system as ParticleSystem)
+      })
+      systems.forEach((system) => renderer.addSystem(system))
+      try {
+        renderer.update(1 / 60)
+        const system = systems.find((system) => system.particleNum > 0)!
+        const particle = system.particles[0]!
+        for (const sample of [0, 0.1, 0.5, 0.9, 1 - Number.EPSILON]) {
+          const random = vi.spyOn(Math, 'random').mockReturnValue(sample)
+          try {
+            system.emitterShape.initialize(particle, system.emissionState)
+          } finally {
+            random.mockRestore()
+          }
+          const position = new Vector3(
+            particle.position.x,
+            particle.position.y,
+            particle.position.z,
+          ).applyQuaternion(system.emitter.quaternion)
+          const velocity = new Vector3(
+            particle.velocity.x,
+            particle.velocity.y,
+            particle.velocity.z,
+          ).applyQuaternion(system.emitter.quaternion)
+          expect(position.x).toBeCloseTo((2 * sample - 1) * radius, 6)
+          expect(position.y).toBeCloseTo(0, 10)
+          expect(position.z).toBeCloseTo(0, 10)
+          expect(velocity.x).toBeCloseTo(0, 10)
+          expect(velocity.y).toBeCloseTo(speed, 10)
+          expect(velocity.z).toBeCloseTo(0, 10)
+        }
+        system.restart()
+        for (let i = 0; i < 12; i++) renderer.update(1 / 60)
+        for (const p of system.particles.slice(0, system.particleNum)) {
+          const origin = worldSpace ? system.emitter.getWorldPosition(new Vector3()) : new Vector3()
+          const orientation = worldSpace
+            ? system.emitter.getWorldQuaternion(new Quaternion()).invert()
+            : new Quaternion()
+          const local = new Vector3(p.position.x, p.position.y, p.position.z)
+            .sub(origin)
+            .applyQuaternion(orientation)
+          expect(Math.abs(local.x)).toBeLessThanOrEqual(radius)
+          expect(local.y).toBeCloseTo(0, 8)
+          expect(local.z * Math.sign(speed)).toBeGreaterThanOrEqual(0)
+        }
+      } finally {
+        systems.forEach((system) => system.dispose())
+        renderer.dispose()
+      }
+    },
+  )
+
+  it('warns when Edge traversal settings cannot be represented by random grid sampling', async () => {
+    const { warnings } = await load(
+      prefab
+        .replace('type: 4\n    angle: 30', 'type: 12\n    angle: 30')
+        .replace('radius: {value: 0.25}', 'radius: {value: 0.25, mode: 1, spread: 0.1}'),
+    )
+    expect(warnings.join('\n')).toContain('Edge traversal modes and spread')
+  })
+
+  it('keeps the explicit unsupported fallback and mesh rotation for Edge mesh particles', async () => {
+    const { text, entries } = meshEntries()
+    delete entries[`${materialGuid}/asset`]
+    const { json, warnings } = await load(
+      text.replace('type: 4\n    angle: 30', 'type: 12\n    angle: 30'),
+      entries,
+    )
+    expect(warnings.join('\n')).toContain('Shape type 12 is unsupported; using point emission.')
+    const group = new QuarksLoader().parse(json)
+    group.traverse((node) => {
+      if ('system' in node) {
+        const system = node.system as ParticleSystem
+        expect(system.emitterShape.type).toBe('point')
+        expect(system.emitter.rotation.x).toBeCloseTo(Math.PI)
+        system.dispose()
+      }
+    })
+  })
+
   it.each([0, 2, 4, 10, 17])(
     'preserves a partial emission arc and reflected forward axis for Unity shape %i',
     async (type) => {
