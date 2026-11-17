@@ -532,6 +532,119 @@ button.hierarchy-row:hover {
   grid-template-columns: minmax(0, 1fr);
   gap: 4px;
 }
+.burst-list {
+  min-width: 0;
+  grid-column: 1 / -1;
+}
+.burst-title {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+.burst-table {
+  width: 100%;
+  table-layout: fixed;
+  border: 1px solid #242424;
+  border-collapse: collapse;
+  background: #303030;
+}
+.burst-table th,
+.burst-table td {
+  min-width: 0;
+  padding: 3px;
+  text-align: left;
+}
+.burst-table th {
+  color: var(--muted);
+  font-weight: 400;
+  border-bottom: 1px solid #242424;
+}
+.burst-table th:nth-child(1) {
+  width: 13%;
+}
+.burst-table th:nth-child(2) {
+  width: 28%;
+}
+.burst-table th:nth-child(3) {
+  width: 15%;
+}
+.burst-table th:nth-child(4) {
+  width: 20%;
+}
+.burst-table th:nth-child(5) {
+  width: 24%;
+}
+.burst-table tbody tr {
+  cursor: default;
+}
+.burst-table tbody tr.selected {
+  background: #365d83;
+}
+.burst-table input:not([type='checkbox']) {
+  width: 100%;
+  min-width: 0;
+  height: 21px;
+  padding: 1px 4px;
+  border: 1px solid #242424;
+  border-radius: 2px;
+  background: #292929;
+  font-size: 11px;
+}
+.burst-table .native-generator {
+  margin: 0;
+}
+.burst-table .native-generator-head {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) 21px;
+  gap: 2px;
+}
+.burst-table .native-generator-label {
+  display: none;
+}
+.burst-table .native-generator-value.constant {
+  grid-column: 1 / 3;
+}
+.burst-table .native-generator-mode {
+  grid-column: 3;
+  width: 21px !important;
+  min-width: 21px;
+}
+.burst-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+.burst-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-top: 3px;
+}
+.burst-actions .btn {
+  width: 22px;
+  min-height: 22px;
+  padding: 0;
+  font-size: 16px;
+}
+.texture-vector-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 36%) repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.texture-vector-label {
+  color: var(--text);
+  font-size: 11px;
+}
+.texture-vector-control {
+  display: grid;
+  grid-template-columns: 11px minmax(0, 1fr);
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.texture-vector-control > span {
+  color: var(--text);
+  font-size: 11px;
+}
 .axis-row {
   display: grid;
   grid-template-columns: minmax(100px, 36%) repeat(3, minmax(0, 1fr));
@@ -569,9 +682,11 @@ button.hierarchy-row:hover {
 }
 .field input:not([type='checkbox']),
 .axis-field input,
+.texture-vector-control input,
 .native-generator input:not([type='checkbox']),
 .native-generator select,
 .field select,
+.texture-vector-control select,
 .modal input {
   width: 100%;
   min-width: 0;

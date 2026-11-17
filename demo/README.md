@@ -1,15 +1,16 @@
 # Reference particle effects
 
 Three native Quarks JSON effects copied from
-[Bug Battle 3D](https://github.com/laminhtruong/bug-battle-3d), with the original
-textures stored as separate PNG files. Only image paths have changed; particle,
-material, geometry, and texture settings are unchanged.
+[Bug Battle 3D](https://github.com/laminhtruong/bug-battle-3d)'s `public/particles/`
+project, with textures stored as separate PNG files. These are standalone reference
+copies; edit the game's project folder to work with its complete current effect set
+and assets.
 
-| Demo             | Game source                                   | Description                |
-| ---------------- | --------------------------------------------- | -------------------------- |
-| `Fire.json`      | `src/content/particles/flame-head.json`       | Continuous flame and smoke |
-| `Lightning.json` | `src/content/particles/lightning-impact.json` | Lightning impact burst     |
-| `Poison.json`    | `src/content/particles/poison-impact.json`    | Poison impact burst        |
+| Demo             | Game source                              | Description                |
+| ---------------- | ---------------------------------------- | -------------------------- |
+| `Fire.json`      | `public/particles/flame-head.json`       | Continuous flame and smoke |
+| `Lightning.json` | `public/particles/lightning-impact.json` | Lightning impact burst     |
+| `Poison.json`    | `public/particles/poison-impact.json`    | Poison impact burst        |
 
 ## Open in the editor
 
@@ -33,17 +34,19 @@ folder immediately.
 
 ## Use in a Three.js project
 
-Keep the JSON files next to the `textures/` directory on your web server. With
-compatible `three` and `three.quarks` installed:
+Keep the JSON files and their relative texture paths on your web server. The game
+project uses `assets/textures/`; these standalone demo copies use `textures/`.
+With `quarks-particle-editor`, `three`, and `three.quarks` installed:
 
 ```ts
-import { BatchedRenderer, QuarksLoader, QuarksUtil } from 'three.quarks'
+import { BatchedRenderer, QuarksUtil } from 'three.quarks'
+import { loadProjectEffect } from 'quarks-particle-editor/loader'
 
 const batch = new BatchedRenderer()
 scene.add(batch)
 
-// loadAsync resolves relative texture URLs against the JSON's directory.
-const effect = await new QuarksLoader().loadAsync('/demo/Fire.json')
+// Loads native JSON and resolves project-relative texture/mesh assets.
+const effect = await loadProjectEffect('/demo/Fire.json')
 scene.add(effect)
 QuarksUtil.addToBatchRenderer(effect, batch)
 
@@ -52,8 +55,9 @@ batch.update(deltaSeconds)
 ```
 
 `scene` and `deltaSeconds` above come from your application's existing scene and
-render loop. If you fetch JSON yourself and call `parse()` instead of `loadAsync()`,
-set the loader's resource path to the JSON directory before parsing.
+render loop. For effects saved by the editor, use `loadProjectEffect()` so external
+mesh assets are resolved before Quarks parses the document. It also loads older
+inline-mesh effects such as these demos.
 
 ## Asset license
 

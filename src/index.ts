@@ -249,6 +249,7 @@ export function createParticleEditor(
   const savedIds = new Set<string>()
   let currentId = ''
   let systemIndex = 0
+  let selectedBurst = 0
   let dirty = false
   let saving = false
   let editRevision = 0
@@ -613,6 +614,14 @@ export function createParticleEditor(
   function nativeAction(target: HTMLElement): void {
     const action = target.dataset.nativeAction
     const path = JSON.parse(target.dataset.nativePath ?? '[]') as NativePath
+    if (action === 'append' && path.at(-1) === 'emissionBursts') {
+      const effect = currentEffect()
+      if (effect)
+        selectedBurst = (getNativeValue(nativeNode(effect.json, systemIndex), path) as unknown[])
+          .length
+    } else if (action === 'remove' && path.includes('emissionBursts')) {
+      selectedBurst = Math.max(0, Number(path.at(-1)) - 1)
+    }
     if (action === 'edit-color' || action === 'edit-gradient' || action === 'edit-curve') {
       const effect = currentEffect()
       if (!effect) return
@@ -705,11 +714,15 @@ export function createParticleEditor(
             ? input.value === ''
               ? NaN
               : Number(input.value)
-            : input.dataset.nativeKind === 'boolean'
-              ? input.checked
-              : input.dataset.nativeKind === 'hex'
-                ? Number.parseInt(input.value.slice(1), 16)
-                : input.value
+            : input.dataset.nativeKind === 'degrees'
+              ? input.value === ''
+                ? NaN
+                : (Number(input.value) * Math.PI) / 180
+              : input.dataset.nativeKind === 'boolean'
+                ? input.checked
+                : input.dataset.nativeKind === 'hex'
+                  ? Number.parseInt(input.value.slice(1), 16)
+                  : input.value
         setNativeValue(root, path, value)
         if (
           path[0] === 'ps' &&
@@ -772,6 +785,22 @@ export function createParticleEditor(
     return renderProperty(behavior.color.toJSON(), ['ps', 'behaviors', index, 'color'], context)
   }
 
+  function renderBursts(ps: NativeRecord, context: PropertyContext): string {
+    const bursts = ps.emissionBursts as NativeRecord[]
+    selectedBurst = Math.min(selectedBurst, bursts.length - 1)
+    const rows = bursts.length
+      ? bursts
+          .map(
+            (burst, index) =>
+              `<tr data-burst-row="${index}" tabindex="0" aria-selected="${index === selectedBurst}" class="${index === selectedBurst ? 'selected' : ''}"><td><input type="number" step="any" aria-label="Burst ${index + 1} time" value="${num(Number(burst.time))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'time']))}" data-native-kind="number"></td><td class="burst-count">${renderProperty(burst.count, ['ps', 'emissionBursts', index, 'count'], context, burst)}</td><td><input type="number" min="1" step="1" aria-label="Burst ${index + 1} cycles" value="${num(Number(burst.cycle))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'cycle']))}" data-native-kind="number"></td><td><input type="number" min="0" step="any" aria-label="Burst ${index + 1} interval" value="${num(Number(burst.interval))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'interval']))}" data-native-kind="number"></td><td><input type="number" min="0" max="1" step="any" aria-label="Burst ${index + 1} probability" value="${num(Number(burst.probability))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'probability']))}" data-native-kind="number"></td></tr>`,
+          )
+          .join('')
+      : '<tr><td class="burst-empty" colspan="5">List is Empty</td></tr>'
+    const listPath = esc(JSON.stringify(['ps', 'emissionBursts']))
+    const removePath = esc(JSON.stringify(['ps', 'emissionBursts', selectedBurst]))
+    return `<div class="burst-title">Bursts</div><div class="burst-list"><table class="burst-table"><thead><tr><th>Time</th><th>Count</th><th>Cycles</th><th>Interval</th><th>Probability</th></tr></thead><tbody>${rows}</tbody></table><div class="burst-actions"><button class="btn small" type="button" aria-label="Add burst" title="Add burst" data-native-action="append" data-native-path="${listPath}">+</button><button class="btn small" type="button" aria-label="Remove selected burst" title="Remove selected burst" data-native-action="remove" data-native-path="${removePath}" ${bursts.length ? '' : 'disabled'}>−</button></div></div>`
+  }
+
   function renderInspector(): void {
     for (const module of inspector.querySelectorAll<HTMLDetailsElement>('[data-module]')) {
       if (module.open) collapsedModules.delete(module.dataset.module!)
@@ -824,7 +853,8 @@ export function createParticleEditor(
       <label class="field"><span>Gravity Y</span><input type="number" step="0.5" value="${num(gravityOf(system))}" data-bind="gravity"></label>
     </div></section>
     <section class="inspect-section"><h3>Emission</h3><div class="field-grid">
-      ${renderProperties(ps, ['emissionOverTime', 'emissionOverDistance', 'emissionBursts'], context)}
+      ${renderProperties(ps, ['emissionOverTime', 'emissionOverDistance'], context)}
+      ${Object.hasOwn(ps, 'emissionBursts') ? renderBursts(ps, context) : ''}
     </div></section>
     <section class="inspect-section"><h3>Shape</h3><div class="field-grid">
       ${renderProperty(ps.shape, ['ps', 'shape'], context)}<p class="hint">Native angles are radians. Mesh surface requires indexed geometry.</p>
@@ -2185,12 +2215,30 @@ export function createParticleEditor(
     'click',
     (event) => {
       const target = (event.target as HTMLElement).closest<HTMLElement>(
-        '[data-action], [data-effect], [data-system], [data-texture], [data-native-action]',
+        '[data-action], [data-effect], [data-system], [data-texture], [data-native-action], [data-burst-row]',
       )
       if (!target) return
       const action = target.dataset.action
       if (target.dataset.nativeAction) {
         if (target.tagName === 'BUTTON') nativeAction(target)
+        else {
+          const row = target.closest<HTMLElement>('[data-burst-row]')
+          if (row) {
+            selectedBurst = Number(row.dataset.burstRow)
+            for (const item of inspector.querySelectorAll<HTMLElement>('[data-burst-row]')) {
+              item.classList.toggle('selected', item === row)
+              item.setAttribute('aria-selected', String(item === row))
+            }
+          }
+        }
+        return
+      }
+      if (target.dataset.burstRow !== undefined) {
+        selectedBurst = Number(target.dataset.burstRow)
+        for (const row of inspector.querySelectorAll<HTMLElement>('[data-burst-row]')) {
+          row.classList.toggle('selected', row === target)
+          row.setAttribute('aria-selected', String(row === target))
+        }
         return
       }
       if (action === 'add-geometry') {
@@ -2552,6 +2600,14 @@ export function createParticleEditor(
     'focusin',
     (event) => {
       const target = event.target as HTMLElement
+      const burstRow = target.closest<HTMLElement>('[data-burst-row]')
+      if (burstRow) {
+        selectedBurst = Number(burstRow.dataset.burstRow)
+        for (const row of inspector.querySelectorAll<HTMLElement>('[data-burst-row]')) {
+          row.classList.toggle('selected', row === burstRow)
+          row.setAttribute('aria-selected', String(row === burstRow))
+        }
+      }
       if (target.dataset.bind) recordHistory()
     },
     { signal: events.signal },

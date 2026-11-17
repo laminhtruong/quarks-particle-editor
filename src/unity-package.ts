@@ -333,6 +333,15 @@ function lifetimeValue(value: Scalar, warn: Warn, label: string): PiecewiseBezie
   return new PiecewiseBezier([[new Bezier(n, n, n, n), 0]])
 }
 
+function offsetFrames(value: PiecewiseBezier, offset: number): PiecewiseBezier {
+  return new PiecewiseBezier(
+    value.functions.map(([curve, start]) => {
+      const [p0, p1, p2, p3] = curve.p
+      return [new Bezier(p0! + offset, p1! + offset, p2! + offset, p3! + offset), start]
+    }),
+  )
+}
+
 function gradient(value: unknown, warn: Warn, label: string): Gradient {
   const data = record(value)
   if (number(data.m_Mode) !== 0)
@@ -897,6 +906,16 @@ async function convertPrefab(
       const gridUV = enabled(uv.enabled) && number(uv.mode) === 0
       const tilesX = gridUV ? Math.max(1, number(uv.tilesX, 1)) : 1
       const tilesY = gridUV ? Math.max(1, number(uv.tilesY, 1)) : 1
+      let startTileIndex: Scalar = gridUV
+        ? value(uv.startFrame, 0, 'Start Frame', tilesX * tilesY)
+        : new ConstantValue(0)
+      if (startTileIndex instanceof PiecewiseBezier) {
+        localWarn('Texture Sheet: start-frame curve is sampled at time zero.')
+        startTileIndex = new ConstantValue(startTileIndex.genValue([], 0))
+      } else if (startTileIndex instanceof IntervalValue) {
+        localWarn('Start Frame: random constants are approximated by their maximum value.')
+        startTileIndex = new ConstantValue(startTileIndex.b)
+      }
       if (gridUV) {
         if (
           number(uv.animationType) !== 0 ||
@@ -908,10 +927,13 @@ async function convertPrefab(
           )
         behaviors.push(
           new FrameOverLife(
-            lifetimeValue(
-              value(uv.frameOverTime, 1, 'Frame over Time', tilesX * tilesY),
-              localWarn,
-              'Frame over Time',
+            offsetFrames(
+              lifetimeValue(
+                value(uv.frameOverTime, 1, 'Frame over Time', tilesX * tilesY),
+                localWarn,
+                'Frame over Time',
+              ),
+              startTileIndex.value,
             ),
           ),
         )
@@ -1027,14 +1049,7 @@ async function convertPrefab(
             : {},
         uTileCount: tilesX,
         vTileCount: tilesY,
-        startTileIndex: (() => {
-          const start = gridUV
-            ? value(uv.startFrame, 0, 'Start Frame', tilesX * tilesY)
-            : new ConstantValue(0)
-          if (!(start instanceof PiecewiseBezier)) return start
-          localWarn('Texture Sheet: start-frame curve is sampled at time zero.')
-          return new ConstantValue(start.genValue([], 0))
-        })(),
+        startTileIndex,
         behaviors,
       })
       systems.push(system)

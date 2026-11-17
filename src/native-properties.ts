@@ -1,3 +1,4 @@
+import { ClampToEdgeWrapping, MirroredRepeatWrapping, RepeatWrapping } from 'three'
 import {
   AxisAngleGenerator,
   BehaviorTypes,
@@ -25,6 +26,13 @@ export type NativeRecord = Record<string, unknown>
 export type NativePath = (string | number)[]
 
 const constant = () => new ConstantValue(1)
+const textureVectorAxes: Record<string, string[]> = {
+  repeat: ['X', 'Y'],
+  offset: ['X', 'Y'],
+  center: ['X', 'Y'],
+  wrap: ['U', 'V'],
+}
+const eulerArrayLabels = ['X (deg)', 'Y (deg)', 'Z (deg)', 'Order']
 const gradient = () =>
   new Gradient([
     [new Vector3(1, 1, 1), 0],
@@ -300,9 +308,36 @@ export function renderProperty(
   owner?: NativeRecord,
 ): string {
   const key = String(path.at(-1))
-  const label = propertyLabel(key)
-  const input = (type: string, current: unknown) =>
-    `<label class="field"><span>${escape(label)}</span><input type="${type}" ${type === 'checkbox' ? (current ? 'checked' : '') : `value="${escape(current)}"`} ${type === 'number' ? 'step="any"' : ''} data-native-path="${attr(path)}" data-native-kind="${typeof current}"></label>`
+  const arrayIndex = typeof path.at(-1) === 'number' ? Number(path.at(-1)) : undefined
+  const behaviorVector =
+    typeof owner?.type === 'string' &&
+    Object.hasOwn(BehaviorTypes, owner.type) &&
+    BehaviorTypes[owner.type]?.params.some(
+      ([name, kinds]) => name === String(path.at(-2)) && kinds.includes('vec3'),
+    )
+  const vectorAxis =
+    behaviorVector && arrayIndex !== undefined ? ['X', 'Y', 'Z'][arrayIndex] : undefined
+  const isEnvMapRotation =
+    path[0] === 'document' && path[1] === 'materials' && path.at(-2) === 'envMapRotation'
+  const arrayEntryLabel = (index: number) => {
+    if (isEnvMapRotation) return eulerArrayLabels[index] ?? `Element ${index + 1}`
+    switch (String(path.at(-2))) {
+      case 'emissionBursts':
+        return `Burst ${index + 1}`
+      case 'functions':
+        return `Curve Segment ${index + 1}`
+      case 'keys':
+        return `Key ${index + 1}`
+      default:
+        return `Element ${index + 1}`
+    }
+  }
+  const label =
+    vectorAxis ?? (arrayIndex === undefined ? propertyLabel(key) : arrayEntryLabel(arrayIndex))
+  const input = (type: string, current: unknown) => {
+    const angleInDegrees = isEnvMapRotation && typeof current === 'number' && Number(key) < 3
+    return `<label class="field"><span>${escape(label)}</span><input type="${type}" ${type === 'checkbox' ? (current ? 'checked' : '') : `value="${escape(angleInDegrees ? (current * 180) / Math.PI : current)}"`} ${type === 'number' ? 'step="any"' : ''} data-native-path="${attr(path)}" data-native-kind="${angleInDegrees ? 'degrees' : typeof current}"></label>`
+  }
   if (typeof value === 'number') {
     if (key === 'color' && typeof owner?.type === 'string' && owner.type.endsWith('Material'))
       return `<div class="field"><span>Color</span><button class="native-color-swatch checkerboard" type="button" aria-label="Edit material color" style="--swatch:#${value.toString(16).padStart(6, '0')}" data-native-path="${attr(path)}" data-native-action="edit-color"></button></div>`
@@ -362,6 +397,13 @@ export function renderProperty(
   }
   if (typeof value === 'boolean') return input('checkbox', value)
   if (typeof value === 'string') {
+    if (isEnvMapRotation && key === '3')
+      return select(
+        path,
+        label,
+        ['XYZ', 'YZX', 'XZY', 'ZXY', 'YXZ', 'ZYX'].map((order) => [order, order] as const),
+        value,
+      )
     if ((key === 'map' || key.endsWith('Map')) && context.textures)
       return select(
         path,
@@ -400,17 +442,32 @@ export function renderProperty(
     return input('text', value)
   }
   if (Array.isArray(value)) {
+    if (path[0] === 'document' && path[1] === 'textures' && textureVectorAxes[key])
+      return `<div class="texture-vector-row"><span class="texture-vector-label">${escape(label)}</span>${value
+        .map((item, index) => {
+          const axis = textureVectorAxes[key]![index] ?? String(index)
+          const itemPath = [...path, index]
+          if (key === 'wrap' && typeof item === 'number')
+            return `<label class="texture-vector-control"><span>${axis}</span><select aria-label="${escape(`${label} ${axis}`)}" data-native-path="${attr(itemPath)}" data-native-kind="number">${options(
+              [
+                [RepeatWrapping, 'Repeat'],
+                [ClampToEdgeWrapping, 'Clamp'],
+                [MirroredRepeatWrapping, 'Mirror'],
+              ],
+              item,
+            )}</select></label>`
+          if (typeof item === 'number')
+            return `<label class="texture-vector-control"><span>${axis}</span><input type="number" step="any" aria-label="${escape(`${label} ${axis}`)}" value="${escape(item)}" data-native-path="${attr(itemPath)}" data-native-kind="number"></label>`
+          return renderProperty(item, itemPath, context, owner)
+        })
+        .join('')}</div>`
     const editable = ['emissionBursts', 'functions', 'keys'].includes(key)
     return `<fieldset class="native-group"><legend>${escape(label)}</legend>${value.map((item, index) => `<div class="native-array-item">${renderProperty(item, [...path, index], context, owner)}${editable ? `<button class="btn small danger" type="button" data-native-action="remove" data-native-path="${attr([...path, index])}">Remove ${index + 1}</button>` : ''}</div>`).join('')}${editable ? `<button class="btn small" type="button" data-native-action="append" data-native-path="${attr(path)}">+ ${key === 'emissionBursts' ? 'Burst' : key === 'keys' ? 'Key' : 'Curve segment'}</button>` : ''}</fieldset>`
   }
   if (!value || typeof value !== 'object') return ''
   const object = value as NativeRecord
   const type = typeof object.type === 'string' ? object.type : ''
-  const compactStartScalar =
-    path.length === 2 &&
-    path[0] === 'ps' &&
-    ['startLife', 'startSpeed', 'startSize', 'startRotation'].includes(key) &&
-    scalarTypes.includes(type)
+  const compactScalar = scalarTypes.includes(type)
   const compactStartColor = path.length === 2 && path[0] === 'ps' && key === 'startColor'
   const rgb = ['r', 'g', 'b'].every((channel) => typeof object[channel] === 'number')
   const rgba = `rgba(${['r', 'g', 'b'].map((channel) => Math.round(Math.max(0, Math.min(1, Number(object[channel]))) * 255)).join(',')},${Math.max(0, Math.min(1, Number(object.a ?? 1)))})`
@@ -443,10 +500,10 @@ export function renderProperty(
   let preview = ''
   if (type === 'PiecewiseBezier') {
     preview = `<button class="native-curve-button" type="button" aria-label="Edit ${escape(label)} curve" data-native-action="edit-curve" data-native-path="${attr(path)}">${curvePreview(object)}<span>Click to edit curve</span></button>`
-    if (!compactStartScalar)
+    if (!compactScalar)
       return `<fieldset class="native-group"><legend>${escape(label)}</legend>${typeControl}${preview}</fieldset>`
   }
-  if (compactStartScalar) {
+  if (compactScalar) {
     const labels: Record<string, string> = {
       ConstantValue: 'Constant',
       PiecewiseBezier: 'Curve',

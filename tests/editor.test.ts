@@ -1403,6 +1403,7 @@ describe('project-independent particle editor', () => {
     await editor.ready
     click('enable-color')
     const markup = root.querySelector('[data-inspector]').innerHTML
+    expect(markup).toContain('class="burst-title">Bursts')
     expect(markup).toContain(
       'data-native-path="[&quot;ps&quot;,&quot;behaviors&quot;,0,&quot;color&quot;]"',
     )
@@ -1519,6 +1520,31 @@ describe('project-independent particle editor', () => {
     expect(emitter.matrix[6]).toBeCloseTo(1)
   })
 
+  it('edits environment map rotation in degrees and saves radians', async () => {
+    const target = effect()
+    ;(target.json.materials as Record<string, unknown>[])[0]!.envMapRotation = [0, 0, 0, 'XYZ']
+    const saveEffect = vi.fn(async (_id: string, _json: QuarksDocument) => {})
+    const { editor, root, click } = mount({
+      listEffects: async () => [target],
+      saveEffect,
+    })
+    await editor.ready
+    expect(root.querySelector('[data-inspector]').innerHTML).toContain('X (deg)')
+    root.listeners.get('change')?.({
+      target: {
+        dataset: {
+          nativePath: '["document","materials",0,"envMapRotation",0]',
+          nativeKind: 'degrees',
+        },
+        value: '90',
+      },
+    })
+    click('save')
+    await vi.waitFor(() => expect(saveEffect).toHaveBeenCalledTimes(1))
+    const material = (saveEffect.mock.calls[0]![1].materials as Record<string, unknown>[])[0]!
+    expect((material.envMapRotation as number[])[0]).toBeCloseTo(Math.PI / 2)
+  })
+
   it('adds, disables, and restores a registered behavior through the inspector', async () => {
     const saveEffect = vi.fn(async (_id: string, _json: unknown) => {})
     const { editor, root, click } = mount({ listEffects: async () => [effect()], saveEffect })
@@ -1623,6 +1649,31 @@ describe('project-independent particle editor', () => {
     expect(root.querySelector('[data-inspector]').innerHTML).toContain(
       'data-module="Emission" open',
     )
+  })
+
+  it('renders emission bursts as an editable Unity-style table', async () => {
+    const item = effect()
+    const ps = (item.json.object.children![0] as { ps: Record<string, unknown> }).ps
+    ps.emissionBursts = [
+      {
+        time: 0.25,
+        count: { type: 'IntervalValue', a: 4, b: 8 },
+        cycle: 2,
+        interval: 0.1,
+        probability: 0.75,
+      },
+    ]
+    const { editor, root } = mount({ listEffects: async () => [item] })
+    await editor.ready
+    const markup = root.querySelector('[data-inspector]').innerHTML
+    expect(markup).toContain(
+      '<th>Time</th><th>Count</th><th>Cycles</th><th>Interval</th><th>Probability</th>',
+    )
+    expect(markup).toContain('class="burst-count"')
+    expect(markup).toContain('value="0.25"')
+    expect(markup).toContain('value="0.75"')
+    expect(markup).toContain('aria-label="Add burst"')
+    expect(markup).toContain('aria-label="Remove selected burst"')
   })
 
   it('rejects oversized JSON without reading or replacing the current document', async () => {

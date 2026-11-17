@@ -815,6 +815,8 @@ describe('Unity package import', () => {
     expect(size.p2).toBeCloseTo(4 / 3)
     expect(ps.startTileIndex.value).toBe(2)
     expect([ps.uTileCount, ps.vTileCount]).toEqual([4, 2])
+    expect(ps.behaviors[4].frame.functions[0].function.p0).toBeCloseTo(2)
+    expect(ps.behaviors[4].frame.functions[0].function.p3).toBeCloseTo(9.992)
     const material = (json.materials as any[]).find((m) => m.uuid === ps.material)
     expect(material).toMatchObject({
       name: 'Fire material',
@@ -840,6 +842,23 @@ describe('Unity package import', () => {
       prepareNativeDocument(json)
       validateNative(json)
     }).not.toThrow()
+  })
+
+  it('keeps a non-first start frame when Frame over Time is constant zero', async () => {
+    const text = prefab
+      .replace(
+        'startFrame: {minMaxState: 0, scalar: 0.25}',
+        'startFrame: {minMaxState: 0, scalar: 0.5}',
+      )
+      .replace(
+        /frameOverTime:\n      minMaxState: 1\n      scalar: 0\.999\n      maxCurve:\n        m_Curve:\n        - \{time: 0, value: 0, outSlope: 1\}\n        - \{time: 1, value: 1, inSlope: 1\}/,
+        'frameOverTime: {minMaxState: 0, scalar: 0}',
+      )
+    const { json } = await load(text)
+    const ps = (json.object as any).children[0].children[1].ps
+    const frame = ps.behaviors.find((behavior: any) => behavior.type === 'FrameOverLife').frame
+    expect(ps.startTileIndex.value).toBe(4)
+    expect(frame.functions[0].function).toMatchObject({ p0: 4, p3: 4 })
   })
 
   it('loads and simulates the converted document with stock Quarks', async () => {

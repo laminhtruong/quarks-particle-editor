@@ -78,6 +78,37 @@ describe('installed Quarks catalog', () => {
     expect(fields).toContain(`value="${type}" selected`)
   })
 
+  it('labels every serialized behavior vector component with its axis', () => {
+    const system = makeSystem()
+    let checked = 0
+    for (const [type, plugin] of Object.entries(BehaviorTypes)) {
+      const behavior = newBehavior(type, system)
+      for (const [key, kinds] of plugin.params) {
+        if (!kinds.includes('vec3') || !Array.isArray(behavior[key])) continue
+        const fields = renderProperties(behavior, [key], context, ['ps', 'behaviors', 0])
+        for (const axis of ['X', 'Y', 'Z']) expect(fields).toContain(`<span>${axis}</span>`)
+        expect(fields).not.toMatch(/<span>[0-2]<\/span>/)
+        checked++
+      }
+    }
+    expect(checked).toBeGreaterThan(0)
+    system.dispose()
+    system.material.dispose()
+  })
+
+  it('names array entries instead of exposing raw zero-based indices', () => {
+    for (const [key, label] of [
+      ['emissionBursts', 'Burst 1'],
+      ['functions', 'Curve Segment 1'],
+      ['keys', 'Key 1'],
+      ['other', 'Element 1'],
+    ] as const) {
+      const fields = renderProperty([{ value: 1 }], ['ps', key], context)
+      expect(fields).toContain(`<legend>${label}</legend>`)
+      expect(fields).not.toContain('<legend>0</legend>')
+    }
+  })
+
   it.each(Object.keys(generatorTemplates))(
     'round-trips generator %s without flattening its values',
     (type) => {
@@ -111,7 +142,7 @@ describe('installed Quarks catalog', () => {
     ).toEqual(['AxisAngle', 'Euler', 'RandomQuat'])
   })
 
-  it('renders scalar start generators compactly with the mode beside the property name', () => {
+  it('renders scalar generators compactly with the mode beside the property name', () => {
     const fields = renderProperty(generatorTemplates.IntervalValue!(), ['ps', 'startLife'], context)
     expect(fields).toContain('class="native-generator"')
     expect(fields).toContain('<span class="native-generator-label">Start Life</span>')
@@ -132,6 +163,18 @@ describe('installed Quarks catalog', () => {
     expect(curve).not.toContain('type="number"')
     expect(curve).not.toContain('Curve segment')
   })
+
+  it.each(['emissionOverTime', 'emissionOverDistance'])(
+    'uses the compact scalar layout for %s',
+    (key) => {
+      const label = key === 'emissionOverTime' ? 'Emission Over Time' : 'Emission Over Distance'
+      const fields = renderProperty(generatorTemplates.ConstantValue!(), ['ps', key], context)
+      expect(fields).toContain(`<span class="native-generator-label">${label}</span>`)
+      expect(fields).toContain('class="native-generator-mode"')
+      expect(fields).toContain('class="native-generator-value constant"')
+      expect(fields).not.toContain('native-group')
+    },
+  )
 
   it('uses the visual curve editor in nested generators and behaviors too', () => {
     for (const path of [
@@ -160,6 +203,46 @@ describe('installed Quarks catalog', () => {
       context,
     )
     expect(randomGradient.match(/data-native-action="edit-gradient"/g)).toHaveLength(2)
+  })
+
+  it('renders texture vectors as compact rows with readable axis and wrap labels', () => {
+    const fields = renderProperties(
+      {
+        repeat: [1, 1],
+        offset: [0, 0],
+        center: [0, 0],
+        wrap: [1001, 1001],
+      },
+      ['repeat', 'offset', 'center', 'wrap'],
+      context,
+      ['document', 'textures', 0],
+    )
+    expect(fields.match(/class="texture-vector-row"/g)).toHaveLength(4)
+    expect(fields).toContain('<span>X</span>')
+    expect(fields).toContain('<span>Y</span>')
+    expect(fields).toContain('aria-label="Repeat X"')
+    expect(fields).toContain('aria-label="Offset Y"')
+    expect(fields).toContain('aria-label="Center X"')
+    expect(fields).toContain('aria-label="Wrap U"')
+    expect(fields).toContain('aria-label="Wrap V"')
+    expect(fields).toContain('value="1001" selected>Clamp</option>')
+    expect(fields).not.toMatch(/<span>[01]<\/span>/)
+  })
+
+  it('labels environment map Euler components and exposes rotation order choices', () => {
+    const fields = renderProperties(
+      { envMapRotation: [Math.PI / 2, 0, 0, 'XYZ'] },
+      ['envMapRotation'],
+      context,
+      ['document', 'materials', 0],
+    )
+    for (const label of ['X (deg)', 'Y (deg)', 'Z (deg)', 'Order'])
+      expect(fields).toContain(`<span>${label}</span>`)
+    expect(fields).toContain('value="90"')
+    expect(fields).toContain('data-native-kind="degrees"')
+    expect(fields).toContain('<select data-native-path=')
+    expect(fields).toContain('value="XYZ" selected')
+    expect(fields).not.toMatch(/<span>[0-3]<\/span>/)
   })
 
   it('uses all burst parameters and permits multiple bursts', () => {
