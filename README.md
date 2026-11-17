@@ -21,8 +21,8 @@ but effects with external image URLs can make browser network requests.
 
 ## Build static site
 
-Run `npm run build:web` to create the deployable site in `dist-web/`, configured
-for the GitHub Pages path `/quarks-particle-editor/`.
+Run `npm run build:web` to create the deployable site in `dist-web/`. Preview it
+locally with `npm run preview:web`.
 
 ## Files and runtime
 

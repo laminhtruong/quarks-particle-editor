@@ -44,6 +44,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build && tsc -p tsconfig.build.json",
     "build:web": "vite build --config vite.web.config.ts",
+    "preview:web": "vite preview --config vite.web.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "format:check": "prettier --check .",
