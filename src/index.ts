@@ -66,6 +66,10 @@ import {
 } from './native-properties.js'
 import type { NativePath, NativeRecord, PropertyContext } from './native-properties.js'
 
+// three.quarks 0.17.1 serializes burst cycle/interval but its emitter never reads them.
+const burstRepeatNote =
+  'Quarks 0.17.1 plays each burst once per loop and ignores cycles/interval; add bursts instead.'
+
 export { parseQuarksDocument, quarksDocumentSchema } from './document.js'
 export type { QuarksDocument } from './document.js'
 export { intervalBounds, updateParticlePreview } from './preview.js'
@@ -792,7 +796,7 @@ export function createParticleEditor(
       ? bursts
           .map(
             (burst, index) =>
-              `<tr data-burst-row="${index}" tabindex="0" aria-selected="${index === selectedBurst}" class="${index === selectedBurst ? 'selected' : ''}"><td><input type="number" step="any" aria-label="Burst ${index + 1} time" value="${num(Number(burst.time))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'time']))}" data-native-kind="number"></td><td class="burst-count">${renderProperty(burst.count, ['ps', 'emissionBursts', index, 'count'], context, burst)}</td><td><input type="number" min="1" step="1" aria-label="Burst ${index + 1} cycles" value="${num(Number(burst.cycle))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'cycle']))}" data-native-kind="number"></td><td><input type="number" min="0" step="any" aria-label="Burst ${index + 1} interval" value="${num(Number(burst.interval))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'interval']))}" data-native-kind="number"></td><td><input type="number" min="0" max="1" step="any" aria-label="Burst ${index + 1} probability" value="${num(Number(burst.probability))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'probability']))}" data-native-kind="number"></td></tr>`,
+              `<tr data-burst-row="${index}" tabindex="0" aria-selected="${index === selectedBurst}" class="${index === selectedBurst ? 'selected' : ''}"><td><input type="number" step="any" aria-label="Burst ${index + 1} time" value="${num(Number(burst.time))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'time']))}" data-native-kind="number"></td><td class="burst-count">${renderProperty(burst.count, ['ps', 'emissionBursts', index, 'count'], context, burst)}</td><td><input type="number" min="1" step="1" aria-label="Burst ${index + 1} cycles" title="${burstRepeatNote}" disabled value="${num(Number(burst.cycle))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'cycle']))}" data-native-kind="number"></td><td><input type="number" min="0" step="any" aria-label="Burst ${index + 1} interval" title="${burstRepeatNote}" disabled value="${num(Number(burst.interval))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'interval']))}" data-native-kind="number"></td><td><input type="number" min="0" max="1" step="any" aria-label="Burst ${index + 1} probability" value="${num(Number(burst.probability))}" data-native-path="${esc(JSON.stringify(['ps', 'emissionBursts', index, 'probability']))}" data-native-kind="number"></td></tr>`,
           )
           .join('')
       : '<tr><td class="burst-empty" colspan="5">List is Empty</td></tr>'

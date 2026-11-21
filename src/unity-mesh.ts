@@ -7,6 +7,17 @@ export function createUnityBuiltinMesh(fileId: string): THREE.BufferGeometry | u
     case '10202':
       geometry = Object.assign(new THREE.BoxGeometry(1, 1, 1), { name: 'Cube' })
       break
+    // Unity's built-in primitives: Cylinder (r 0.5, h 2), Sphere (r 0.5), Capsule (r 0.5, h 2).
+    // They are rotationally symmetric, so the handedness reflection does not change their shape.
+    case '10206':
+      geometry = Object.assign(new THREE.CylinderGeometry(0.5, 0.5, 2, 24), { name: 'Cylinder' })
+      break
+    case '10207':
+      geometry = Object.assign(new THREE.SphereGeometry(0.5, 24, 16), { name: 'Sphere' })
+      break
+    case '10208':
+      geometry = Object.assign(new THREE.CapsuleGeometry(0.5, 1, 8, 24), { name: 'Capsule' })
+      break
     case '10209':
       geometry = Object.assign(new THREE.PlaneGeometry(10, 10, 10, 10).rotateX(-Math.PI / 2), {
         name: 'Plane',

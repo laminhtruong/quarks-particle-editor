@@ -23,7 +23,6 @@ import {
   PiecewiseBezier,
   PointEmitter,
   RandomColorBetweenGradient,
-  RectangleEmitter,
   RenderMode,
   RotationOverLife,
   Rotation3DOverLife,
@@ -249,6 +248,118 @@ function objects(asset: Asset): UnityObject[] {
 
 type Scalar = ConstantValue | IntervalValue | PiecewiseBezier
 
+/** A cubic Bezier segment over source time [s, e]; control points are per-segment values. */
+interface Piece {
+  p: number[]
+  s: number
+  e: number
+}
+
+function splitBezier(p: readonly number[], u: number): [number[], number[]] {
+  const [a, b, c, d] = p as [number, number, number, number]
+  const ab = a + (b - a) * u,
+    bc = b + (c - b) * u,
+    cd = c + (d - c) * u
+  const abc = ab + (bc - ab) * u,
+    bcd = bc + (cd - bc) * u
+  const m = abc + (bcd - abc) * u
+  return [
+    [a, ab, abc, m],
+    [m, bcd, cd, d],
+  ]
+}
+
+function pieces(curve: PiecewiseBezier): Piece[] {
+  const functions = curve.functions
+  return functions.map(([bezier, s], i) => ({ p: [...bezier.p], s, e: functions[i + 1]?.[1] ?? 1 }))
+}
+
+/** Restricts pieces to source time [t0, t1], subdividing Bezier segments exactly. */
+function windowPieces(source: Piece[], t0: number, t1: number): Piece[] {
+  const result: Piece[] = []
+  for (const piece of source) {
+    const s = Math.max(piece.s, t0),
+      e = Math.min(piece.e, t1)
+    if (!(e > s)) continue
+    const width = piece.e - piece.s
+    const u0 = (s - piece.s) / width,
+      u1 = (e - piece.s) / width
+    let p = u0 > 0 ? splitBezier(piece.p, u0)[1] : piece.p
+    if (u1 < 1) p = splitBezier(p, (u1 - u0) / (1 - u0))[0]
+    result.push({ p, s, e })
+  }
+  return result
+}
+
+const flatPiece = (value: number, s: number, e: number): Piece => ({
+  p: [value, value, value, value],
+  s,
+  e,
+})
+
+function toCurve(source: Piece[]): PiecewiseBezier {
+  const sorted = source.filter((piece) => piece.e - piece.s > 1e-9).sort((a, b) => a.s - b.s)
+  if (!sorted.length) throw new Error('Curve has no segments.')
+  if (sorted[0]!.s > 0) sorted.unshift(flatPiece(sorted[0]!.p[0]!, 0, sorted[0]!.s))
+  return new PiecewiseBezier(
+    sorted.map(({ p, s }) => [new Bezier(p[0]!, p[1]!, p[2]!, p[3]!), s] as [Bezier, number]),
+  )
+}
+
+/** Unity texture-sheet cycles: G(t) = F(fract(t * cycles)). */
+function repeatCurve(curve: PiecewiseBezier, cycles: number): PiecewiseBezier {
+  if (cycles === 1) return curve
+  const source = pieces(curve)
+  const result: Piece[] = []
+  for (let k = 0; k < cycles; k++)
+    for (const piece of windowPieces(source, 0, Math.min(1, cycles - k)))
+      result.push({ p: piece.p, s: (piece.s + k) / cycles, e: (piece.e + k) / cycles })
+  return toCurve(result)
+}
+
+/** Non-looping start delay: the system's normalized time [0, 1] becomes [start, 1]. */
+function delayCurve(curve: PiecewiseBezier, start: number, before?: number): PiecewiseBezier {
+  const mapped = pieces(curve).map((piece) => ({
+    p: piece.p,
+    s: start + (1 - start) * piece.s,
+    e: start + (1 - start) * piece.e,
+  }))
+  return toCurve([flatPiece(before ?? mapped[0]!.p[0]!, 0, start), ...mapped])
+}
+
+/** Looping start delay keeps the phase: G(t) = F((t - phase) mod 1). */
+function phaseCurve(curve: PiecewiseBezier, phase: number): PiecewiseBezier {
+  if (!phase) return curve
+  const source = pieces(curve)
+  return toCurve([
+    ...windowPieces(source, 1 - phase, 1).map((piece) => ({
+      p: piece.p,
+      s: piece.s - (1 - phase),
+      e: piece.e - (1 - phase),
+    })),
+    ...windowPieces(source, 0, 1 - phase).map((piece) => ({
+      p: piece.p,
+      s: piece.s + phase,
+      e: piece.e + phase,
+    })),
+  ])
+}
+
+/** The constant value of a Unity curve whose keys are all equal with zero tangents. */
+function flatCurveValue(value: unknown): number | undefined {
+  const keys = array(record(value).m_Curve).map(record)
+  if (!keys.length) return undefined
+  const first = number(keys[0]!.value)
+  return keys.every(
+    (key) =>
+      number(key.value) === first &&
+      Number(key.inSlope ?? 0) === 0 &&
+      Number(key.outSlope ?? 0) === 0,
+  )
+    ? first
+    : undefined
+}
+
 function scalar(
   value: unknown,
   fallback: number,
@@ -267,10 +378,19 @@ function scalar(
     const other = number(data.minScalar, fallback) * factor
     return new IntervalValue(Math.min(other, scale) + offset, Math.max(other, scale) + offset)
   }
-  if (mode === 2)
+  if (mode === 2) {
+    // Unity lerps per particle between both curves; two flat curves are exactly a random constant.
+    const min = flatCurveValue(data.minCurve),
+      max = flatCurveValue(data.maxCurve)
+    if (min !== undefined && max !== undefined) {
+      const a = min * scale + offset,
+        b = max * scale + offset
+      return a === b ? new ConstantValue(a) : new IntervalValue(Math.min(a, b), Math.max(a, b))
+    }
     warn(`${label}: random between two curves is not supported; using the maximum curve.`)
-  else if (mode !== 1) warn(`${label}: unknown curve mode ${mode}; using the maximum curve.`)
-  const keys = array(record(data.maxCurve).m_Curve).map(record)
+  } else if (mode !== 1) warn(`${label}: unknown curve mode ${mode}; using the maximum curve.`)
+  const maxCurve = record(data.maxCurve)
+  const keys = array(maxCurve.m_Curve).map(record)
   if (!keys.length) {
     warn(`${label}: empty animation curve; using its scalar value.`)
     return new ConstantValue(scale + offset)
@@ -285,39 +405,34 @@ function scalar(
       outSlope: Number(key.outSlope ?? 0) * scale,
     }))
     .sort((a, b) => a.time - b.time)
+  if (points.some((point, i) => i > 0 && point.time === points[i - 1]!.time))
+    throw new Error(`${label}: curve keys must have distinct times.`)
+  const first = points[0]!,
+    last = points.at(-1)!
+  // Unity's internal wrap mode 2 clamps outside the key range; other modes repeat the curve.
   if (
-    points.some(
-      (point, i) =>
-        point.time < 0 || point.time > 1 || (i > 0 && point.time === points[i - 1]!.time),
-    )
+    (first.time > 0 && number(maxCurve.m_PreInfinity, 2) !== 2) ||
+    (last.time < 1 && number(maxCurve.m_PostInfinity, 2) !== 2)
   )
-    throw new Error(`${label}: curve keys must have distinct times in [0, 1].`)
-  const curves: [Bezier, number][] = []
-  const first = points[0]!
-  if (first.time > 0)
-    curves.push([new Bezier(first.value, first.value, first.value, first.value), 0])
+    warn(`${label}: curve loop/ping-pong wrap modes are approximated by clamping.`)
+  const segments: Piece[] = [flatPiece(first.value, Math.min(0, first.time - 1), first.time)]
   for (let i = 0; i + 1 < points.length; i++) {
     const a = points[i]!,
       b = points[i + 1]!
     const dt = (b.time - a.time) / 3
+    // Unity evaluates an infinite (constant) tangent as holding the left key.
     const step = !Number.isFinite(a.outSlope) || !Number.isFinite(b.inSlope)
-    curves.push([
-      new Bezier(
-        a.value,
-        step ? a.value : a.value + a.outSlope * dt,
-        step ? a.value : b.value - b.inSlope * dt,
-        step ? a.value : b.value,
-      ),
-      a.time,
-    ])
+    segments.push({
+      p: step
+        ? [a.value, a.value, a.value, a.value]
+        : [a.value, a.value + a.outSlope * dt, b.value - b.inSlope * dt, b.value],
+      s: a.time,
+      e: b.time,
+    })
   }
-  const last = points.at(-1)!
-  if (last.time < 1 || !curves.length)
-    curves.push([
-      new Bezier(last.value, last.value, last.value, last.value),
-      last.time === 1 ? 0 : last.time,
-    ])
-  return new PiecewiseBezier(curves)
+  segments.push(flatPiece(last.value, last.time, Math.max(1, last.time + 1)))
+  // Keys may lie outside [0, 1]; only the evaluated lifetime/duration range is kept.
+  return toCurve(windowPieces(segments, 0, 1))
 }
 
 function rgba(value: unknown): QVector4 {
@@ -325,12 +440,89 @@ function rgba(value: unknown): QVector4 {
   return new QVector4(number(data.r, 1), number(data.g, 1), number(data.b, 1), number(data.a, 1))
 }
 
-function lifetimeValue(value: Scalar, warn: Warn, label: string): PiecewiseBezier {
-  if (value instanceof PiecewiseBezier) return value
-  if (value instanceof IntervalValue)
-    warn(`${label}: random constants are approximated by their maximum value.`)
-  const n = value instanceof ConstantValue ? value.value : value.b
-  return new PiecewiseBezier([[new Bezier(n, n, n, n), 0]])
+const scalarMid = (value: ConstantValue | IntervalValue) =>
+  value instanceof ConstantValue ? value.value : (value.a + value.b) / 2
+
+const addScalar = (value: ConstantValue | IntervalValue, offset: number) =>
+  value instanceof ConstantValue
+    ? new ConstantValue(value.value + offset)
+    : new IntervalValue(value.a + offset, value.b + offset)
+
+/** Unity Texture Sheet Animation in Grid mode as a Quarks tile index and optional FrameOverLife. */
+function textureSheet(
+  uv: RecordValue,
+  startLifetime: Scalar,
+  warn: Warn,
+): {
+  tilesX: number
+  tilesY: number
+  startTileIndex: ConstantValue | IntervalValue
+  frame?: PiecewiseBezier
+} {
+  if (!enabled(uv.enabled) || number(uv.mode) !== 0) {
+    if (enabled(uv.enabled)) warn('Sprite-based texture sheet animation is not converted.')
+    return { tilesX: 1, tilesY: 1, startTileIndex: new ConstantValue(0) }
+  }
+  const tilesX = Math.max(1, Math.floor(number(uv.tilesX, 1)))
+  const tilesY = Math.max(1, Math.floor(number(uv.tilesY, 1)))
+  const singleRow = number(uv.animationType) === 1
+  const frames = singleRow ? tilesX : tilesX * tilesY
+  let rowOffset = 0
+  if (singleRow) {
+    // Unity 2019+ uses rowMode (Custom, Random, MeshIndex); older files use randomRow.
+    const rowMode =
+      uv.rowMode !== undefined ? number(uv.rowMode) : enabled(uv.randomRow ?? 1) ? 1 : 0
+    if (rowMode === 0)
+      rowOffset = Math.min(tilesY - 1, Math.max(0, Math.floor(number(uv.rowIndex)))) * tilesX
+    else warn('Texture Sheet: random/mesh-index row selection is approximated by the first row.')
+  }
+  let start: Scalar = scalar(uv.startFrame, 0, warn, 'Start Frame', frames, rowOffset)
+  if (start instanceof PiecewiseBezier) {
+    warn('Texture Sheet: start-frame curve is sampled at time zero.')
+    start = new ConstantValue(start.genValue([], 0))
+  }
+  const timeMode = number(uv.timeMode)
+  let cycles = number(uv.cycles, 1) > 0 ? number(uv.cycles, 1) : 1
+  let frame: Scalar
+  if (timeMode === 2) {
+    // FPS mode advances one whole animation per frames / fps seconds of particle age.
+    const life =
+      startLifetime instanceof ConstantValue
+        ? startLifetime.value
+        : startLifetime instanceof IntervalValue
+          ? startLifetime.b
+          : Math.max(...startLifetime.functions.flatMap(([curve]) => curve.p))
+    if (!(startLifetime instanceof ConstantValue))
+      warn('Texture Sheet: FPS timing with variable lifetime uses the maximum start lifetime.')
+    cycles = (Math.max(0, life) * Math.max(0, number(uv.fps, 30))) / frames || 1
+    const end = frames * 0.9999
+    frame = new PiecewiseBezier([[new Bezier(0, end / 3, (2 * end) / 3, end), 0]])
+  } else {
+    if (timeMode === 1)
+      warn('Texture Sheet: speed-range timing is approximated by lifetime timing.')
+    frame = scalar(uv.frameOverTime, 1, warn, 'Frame over Time', frames)
+  }
+  if (cycles > 1000) {
+    warn('Texture Sheet: more than 1000 cycles per lifetime are limited to 1000.')
+    cycles = 1000
+  }
+  if (!(frame instanceof PiecewiseBezier)) {
+    // A per-particle constant frame is a start tile; FrameOverLife ignores non-curve values.
+    if (start instanceof ConstantValue)
+      return { tilesX, tilesY, startTileIndex: addScalar(frame, start.value) }
+    if (frame instanceof IntervalValue)
+      warn('Texture Sheet: random start frame plus random frame uses the start-frame midpoint.')
+    return { tilesX, tilesY, startTileIndex: addScalar(start, scalarMid(frame)) }
+  }
+  if (start instanceof IntervalValue)
+    warn('Texture Sheet: random start frame with animated frames uses the start-frame midpoint.')
+  const animated = offsetFrames(repeatCurve(frame, cycles), scalarMid(start))
+  return {
+    tilesX,
+    tilesY,
+    startTileIndex: new ConstantValue(animated.genValue([], 0)),
+    frame: animated,
+  }
 }
 
 function offsetFrames(value: PiecewiseBezier, offset: number): PiecewiseBezier {
@@ -393,12 +585,29 @@ function lifetimeColor(value: unknown, warn: Warn): FunctionColorGenerator {
   return flat(generator.genColor([], new QVector4()))
 }
 
+// Uniform random samples on a native grid; each axis is quantized to this many cells.
+const GRID_CELLS = 2 ** 12
+
 function shape(value: unknown, warn: Warn, mesh: boolean): EmitterShape {
   const data = record(value)
   if (!enabled(data.enabled)) return new PointEmitter()
   const type = number(data.type)
+  // Shape scale (Unity 2017+) scales spawn positions; it is baked into the native dimensions.
+  const scaleData = record(data.m_Scale)
+  const [sx, sy, sz] = ['x', 'y', 'z'].map((axis) => Math.abs(number(scaleData[axis], 1))) as [
+    number,
+    number,
+    number,
+  ]
+  const planar = [10, 11, 12, 17].includes(type)
+  const uniform = planar ? sx === sy : sx === sy && sy === sz
+  const radiusScale = type === 12 ? sx : planar ? Math.max(sx, sy) : Math.max(sx, sy, sz)
+  if (![5, 15, 16, 18].includes(type) && !uniform)
+    warn('Shape: non-uniform shape scale is approximated by its largest axis.')
   const radius =
-    typeof data.radius === 'object' ? number(record(data.radius).value, 1) : number(data.radius, 1)
+    (typeof data.radius === 'object'
+      ? number(record(data.radius).value, 1)
+      : number(data.radius, 1)) * radiusScale
   const thickness = number(data.radiusThickness, [1, 3, 7, 9, 11].includes(type) ? 0 : 1)
   const arc = record(data.arc)
   const params = {
@@ -409,15 +618,6 @@ function shape(value: unknown, warn: Warn, mesh: boolean): EmitterShape {
     mode: number(arc.mode),
     spread: number(arc.spread),
     speed: scalar(arc.speed, 1, warn, 'Shape arc speed'),
-  }
-  for (const key of ['m_Position', 'm_Rotation', 'm_Scale']) {
-    const vector = record(data[key])
-    if (
-      ['x', 'y', 'z'].some(
-        (axis) => number(vector[axis], key === 'm_Scale' ? 1 : 0) !== (key === 'm_Scale' ? 1 : 0),
-      )
-    )
-      warn(`Shape: ${key} is not applied independently of the emitter transform.`)
   }
   if (
     enabled(data.alignToDirection) ||
@@ -440,13 +640,210 @@ function shape(value: unknown, warn: Warn, mesh: boolean): EmitterShape {
     return new GridEmitter({ width: 2 * radius, height: 0, row: 1, column: 2 ** 24 })
   }
   if (type === 17)
-    return new DonutEmitter({ ...params, donutRadius: number(data.donutRadius, 0.2) })
+    return new DonutEmitter({
+      ...params,
+      donutRadius: number(data.donutRadius, 0.2) * radiusScale,
+    })
   if ([5, 15, 16, 18].includes(type)) {
-    if (type !== 18) warn('Shape: box emission is approximated by a flat rectangle.')
-    return new RectangleEmitter({ width: number(data.boxX, 1), height: number(data.boxY, 1) })
+    // Unity 2017+ stores the box/rectangle size as shape scale; older files used boxX/Y/Z.
+    const width = data.boxX !== undefined ? Math.abs(number(data.boxX, 1)) : sx
+    const height = data.boxY !== undefined ? Math.abs(number(data.boxY, 1)) : sy
+    const depth = data.boxZ !== undefined ? Math.abs(number(data.boxZ, 1)) : sz
+    if (type === 5 && depth > 0)
+      warn('Shape: box volume depth is not represented; particles spawn on its central XY plane.')
+    if (type === 15 || type === 16)
+      warn('Shape: box shell/edge emission is approximated by the box cross-section area.')
+    // Unity Box/Rectangle emit across the area along +Z; Quarks RectangleEmitter emits outward
+    // from its perimeter, so the native grid is the matching shape.
+    return new GridEmitter({ width, height, row: GRID_CELLS, column: GRID_CELLS })
   }
   warn(`Shape type ${type} is unsupported; using point emission.`)
   return new PointEmitter()
+}
+
+/**
+ * A Unity local-space Force over Lifetime as the world-space acceleration Quarks applies.
+ * Constants rotate exactly; curves/randoms are exact only under axis-aligned rotations.
+ */
+function localForce(
+  force: RecordValue,
+  node: THREE.Object3D,
+  make: (input: unknown, axis: string, factor: number) => Scalar,
+): ForceOverLife | undefined {
+  node.updateWorldMatrix(true, false)
+  // Columns are the three.js world directions of Unity's local X, Y and Z (Z reflected).
+  const m = new THREE.Matrix4()
+    .makeRotationFromQuaternion(node.getWorldQuaternion(new THREE.Quaternion()))
+    .multiply(new THREE.Matrix4().makeScale(1, 1, -1)).elements
+  const inputs = [force.x, force.y, force.z]
+  const axes = ['X', 'Y', 'Z']
+  const generators = inputs.map((input, i) => make(input, axes[i]!, 1))
+  const clean = (v: number) => (Math.abs(v) < 1e-9 ? 0 : v)
+  if (generators.every((generator) => generator instanceof ConstantValue)) {
+    const world = [0, 1, 2].map((row) =>
+      generators.reduce(
+        (sum, generator, column) => sum + m[column * 4 + row]! * (generator as ConstantValue).value,
+        0,
+      ),
+    )
+    return new ForceOverLife(
+      new ConstantValue(clean(world[0]!)),
+      new ConstantValue(clean(world[1]!)),
+      new ConstantValue(clean(world[2]!)),
+    )
+  }
+  const rows: Scalar[] = []
+  for (let row = 0; row < 3; row++) {
+    const column = [0, 1, 2].find((c) => Math.abs(m[c * 4 + row]!) > 1 - 1e-6)
+    if (column === undefined) return undefined
+    rows.push(make(inputs[column], axes[column]!, Math.sign(m[column * 4 + row]!)))
+  }
+  return new ForceOverLife(rows[0]!, rows[1]!, rows[2]!)
+}
+
+/** Unity's default-resources ("extra") GUID for built-in shaders and materials. */
+const BUILTIN_EXTRA_GUID = '0000000000000000f000000000000000'
+/** Built-in Standard (45, 46) and Particles/Standard Surface/Unlit (210, 211) tint with _Color. */
+const BUILTIN_SHADER_COLOR: Record<string, string> = {
+  '45': '_Color',
+  '46': '_Color',
+  '210': '_Color',
+  '211': '_Color',
+}
+/** Built-in Default-Particle material: a soft white sprite with alpha blending. */
+const BUILTIN_DEFAULT_PARTICLE = '10301'
+const COLOR_PROPERTIES = ['_BaseColor', '_TintColor', '_Color']
+// UnityEngine.Rendering.BlendMode and BlendOp, in enum order.
+const BLEND_FACTORS = [
+  THREE.ZeroFactor,
+  THREE.OneFactor,
+  THREE.DstColorFactor,
+  THREE.SrcColorFactor,
+  THREE.OneMinusDstColorFactor,
+  THREE.SrcAlphaFactor,
+  THREE.OneMinusSrcColorFactor,
+  THREE.DstAlphaFactor,
+  THREE.OneMinusDstAlphaFactor,
+  THREE.SrcAlphaSaturateFactor,
+  THREE.OneMinusSrcAlphaFactor,
+] as const
+const BLEND_NAMES = [
+  'Zero',
+  'One',
+  'DstColor',
+  'SrcColor',
+  'OneMinusDstColor',
+  'SrcAlpha',
+  'OneMinusSrcColor',
+  'DstAlpha',
+  'OneMinusDstAlpha',
+  'SrcAlphaSaturate',
+  'OneMinusSrcAlpha',
+]
+const BLEND_EQUATIONS = [
+  THREE.AddEquation,
+  THREE.SubtractEquation,
+  THREE.ReverseSubtractEquation,
+  THREE.MinEquation,
+  THREE.MaxEquation,
+] as const
+
+/** Property names declared in a ShaderLab Properties block. */
+function shaderProperties(source: string): Set<string> {
+  const start = /\bProperties\s*\{/.exec(source)
+  if (!start) return new Set()
+  let depth = 0,
+    end = start.index + start[0].length - 1
+  for (; end < source.length; end++) {
+    if (source[end] === '{') depth++
+    else if (source[end] === '}' && --depth === 0) break
+  }
+  const block = source.slice(start.index + start[0].length, end)
+  return new Set(
+    [...block.matchAll(/^\s*(?:\[[^\]]*\]\s*)*(_\w+)\s*\(/gm)].map((match) => match[1]!),
+  )
+}
+
+/** The first fixed-function Blend directive of a ShaderLab source; [_Prop] reads a material float. */
+function shaderBlend(
+  source: string,
+  floats: RecordValue,
+): { src: number; dst: number } | 'opaque' | undefined {
+  const code = source.replace(/\/\/.*$/gm, '')
+  const match = /^\s*Blend\s+(Off|[^\s,]+)(?:\s+([^\s,]+))?/m.exec(code)
+  if (!match) {
+    // Surface shaders generate their blend state from #pragma surface options.
+    const surface = /^\s*#pragma\s+surface\b(.*)$/m.exec(code)?.[1] ?? ''
+    if (/\bdecal:add\b/.test(surface)) return { src: 1, dst: 1 }
+    if (/\balpha:premul\b/.test(surface)) return { src: 1, dst: 10 }
+    if (/\b(alpha(:fade|:blend)?|decal:blend)(?=\s|$)/.test(surface)) return { src: 5, dst: 10 }
+    return 'opaque'
+  }
+  if (match[1] === 'Off') return 'opaque'
+  const factor = (token: string | undefined) => {
+    const property = /^\[(\w+)\]$/.exec(token ?? '')?.[1]
+    if (property) return floats[property] === undefined ? undefined : number(floats[property])
+    const index = BLEND_NAMES.findIndex((name) => name.toLowerCase() === token?.toLowerCase())
+    return index < 0 ? undefined : index
+  }
+  const src = factor(match[1]),
+    dst = factor(match[2])
+  return src === undefined || dst === undefined ? undefined : { src, dst }
+}
+
+/** Minimal RGBA PNG encoder for generated built-in textures (zlib via CompressionStream). */
+async function encodePng(width: number, height: number, rgba: Uint8Array): Promise<string> {
+  const raw = new Uint8Array((width * 4 + 1) * height)
+  for (let y = 0; y < height; y++)
+    raw.set(rgba.subarray(y * width * 4, (y + 1) * width * 4), y * (width * 4 + 1) + 1)
+  const deflated = new Uint8Array(
+    await new Response(
+      new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate')),
+    ).arrayBuffer(),
+  )
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    return c >>> 0
+  })
+  const chunk = (type: string, data: Uint8Array) => {
+    const out = new Uint8Array(12 + data.length)
+    const view = new DataView(out.buffer)
+    view.setUint32(0, data.length)
+    out.set(new TextEncoder().encode(type), 4)
+    out.set(data, 8)
+    let crc = 0xffffffff
+    for (const byte of out.subarray(4, 8 + data.length))
+      crc = crcTable[(crc ^ byte) & 0xff]! ^ (crc >>> 8)
+    view.setUint32(8 + data.length, (crc ^ 0xffffffff) >>> 0)
+    return out
+  }
+  const header = new Uint8Array(13)
+  new DataView(header.buffer).setUint32(0, width)
+  new DataView(header.buffer).setUint32(4, height)
+  header.set([8, 6, 0, 0, 0], 8)
+  const parts = [
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', header),
+    chunk('IDAT', deflated),
+    chunk('IEND', new Uint8Array(0)),
+  ]
+  let binary = ''
+  for (const part of parts) for (const byte of part) binary += String.fromCharCode(byte)
+  return `data:image/png;base64,${btoa(binary)}`
+}
+
+/** An approximation of Unity's Default-Particle texture: white with a smooth radial alpha falloff. */
+async function defaultParticleTexture(): Promise<string> {
+  const size = 64
+  const pixels = new Uint8Array(size * size * 4)
+  for (let y = 0; y < size; y++)
+    for (let x = 0; x < size; x++) {
+      const r = Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) / (size / 2)
+      const t = Math.max(0, 1 - r)
+      pixels.set([255, 255, 255, Math.round(255 * t * t * (3 - 2 * t))], (y * size + x) * 4)
+    }
+  return encodePng(size, size, pixels)
 }
 
 async function convertPrefab(
@@ -545,7 +942,8 @@ async function convertPrefab(
 
   async function material(reference: unknown): Promise<THREE.MeshBasicMaterial> {
     const id = guid(reference)
-    const cached = materialCache.get(id)
+    const key = `${id}:${fileId(reference)}`
+    const cached = materialCache.get(key)
     if (cached) return cached
     const source = assets.get(id)
     const result = new THREE.MeshBasicMaterial({
@@ -554,7 +952,21 @@ async function convertPrefab(
       side: THREE.DoubleSide,
     })
     materials.push(result)
-    materialCache.set(id, result)
+    materialCache.set(key, result)
+    if (!source && id === BUILTIN_EXTRA_GUID && fileId(reference) === BUILTIN_DEFAULT_PARTICLE) {
+      // Built-in resources are identified by Unity's default-resources GUID and fileID.
+      result.name = 'Default-Particle'
+      const texture = new THREE.Texture()
+      texture.name = 'Default-Particle'
+      texture.colorSpace = THREE.NoColorSpace
+      textureUrls.set(texture.uuid, await defaultParticleTexture())
+      textureCache.set(key, texture)
+      result.map = texture
+      warn(
+        'Default-Particle: Unity built-in material is approximated by a generated soft round sprite.',
+      )
+      return result
+    }
     if (!source) {
       warn(
         `Material ${id || '(built-in/missing)'} is not in the package; using an untextured alpha material.`,
@@ -571,7 +983,44 @@ async function convertPrefab(
       ...array(properties.m_Ints).map(record),
     ) as RecordValue
     const colors = Object.assign({}, ...array(properties.m_Colors).map(record)) as RecordValue
-    const tint = rgba(colors._BaseColor ?? colors._TintColor ?? colors._Color)
+    const keywords = new Set(
+      [
+        ...String(data.m_ShaderKeywords ?? '').split(/\s+/),
+        ...array(data.m_ValidKeywords).map(String),
+      ].filter(Boolean),
+    )
+    const shaderId = guid(data.m_Shader)
+    const shaderAsset = assets.get(shaderId)
+    const shaderSource =
+      shaderAsset && /\.shader$/i.test(shaderAsset.path)
+        ? decoder.decode(shaderAsset.data)
+        : undefined
+    const shader =
+      shaderSource !== undefined
+        ? (/Shader\s+"([^"]+)"/.exec(shaderSource)?.[1] ?? shaderAsset!.path)
+        : '(built-in or unavailable shader)'
+    shaderNames.set(id, shader)
+    // Materials keep stale properties from earlier shaders, so the tint is the property the
+    // current shader declares; a shader declaring none of them is untinted.
+    const declared = shaderSource !== undefined ? shaderProperties(shaderSource) : undefined
+    const builtinColor =
+      shaderId === BUILTIN_EXTRA_GUID ? BUILTIN_SHADER_COLOR[fileId(data.m_Shader)] : undefined
+    let tintProperty: string | undefined
+    if (declared) tintProperty = COLOR_PROPERTIES.find((name) => declared.has(name))
+    else if (builtinColor) tintProperty = builtinColor
+    else {
+      const present = COLOR_PROPERTIES.filter((name) => colors[name] !== undefined)
+      tintProperty = present[0]
+      // Integer channels parse as BigInt, so compare normalized numbers rather than YAML values.
+      const values = present.map((name) => rgba(colors[name]).toArray().join(','))
+      if (new Set(values).size > 1)
+        warn(
+          `${source.path}: shader is unavailable; tint uses ${tintProperty} among differing ${present.join('/')} values.`,
+        )
+    }
+    const tint = tintProperty ? rgba(colors[tintProperty]) : new QVector4(1, 1, 1, 1)
+    // The Quarks unlit shader writes colors without output encoding, matching Unity's displayed
+    // (gamma) values: serialized colors are therefore used without color-space conversion.
     result.color.setRGB(tint.x, tint.y, tint.z, THREE.LinearSRGBColorSpace)
     result.opacity = tint.w
     if (floats._ZWrite !== undefined) result.depthWrite = enabled(floats._ZWrite)
@@ -582,25 +1031,35 @@ async function convertPrefab(
           : number(floats._Cull) === 1
             ? THREE.BackSide
             : THREE.FrontSide
-    if (enabled(floats._AlphaClip) || enabled(floats._AlphaTest))
+    if (enabled(floats._AlphaClip) || enabled(floats._AlphaTest) || keywords.has('_ALPHATEST_ON'))
       result.alphaTest = number(floats._Cutoff, 0.5)
-    const shaderId = guid(data.m_Shader)
-    const shaderAsset = assets.get(shaderId)
-    const shader =
-      shaderAsset && /\.shader$/i.test(shaderAsset.path)
-        ? (/Shader\s+"([^"]+)"/.exec(decoder.decode(shaderAsset.data))?.[1] ?? shaderAsset.path)
-        : '(built-in or unavailable shader)'
-    shaderNames.set(id, shader)
-    if (
-      (number(floats._SrcBlend) === 5 && number(floats._DstBlend) === 1) ||
-      /additive/i.test(shader)
+    const blend =
+      floats._SrcBlend !== undefined && floats._DstBlend !== undefined
+        ? { src: number(floats._SrcBlend), dst: number(floats._DstBlend) }
+        : shaderSource !== undefined
+          ? shaderBlend(shaderSource, floats)
+          : undefined
+    const op = Math.floor(number(floats._BlendOp))
+    if (blend === undefined)
+      warn(`${source.path}: blend state is unavailable; using normal alpha blending.`)
+    else if (blend === 'opaque' || (blend.src === 1 && blend.dst === 0 && op === 0)) {
+      result.transparent = false
+      result.depthWrite = true
+    } else if (
+      BLEND_FACTORS[blend.src] === undefined ||
+      BLEND_FACTORS[blend.dst] === undefined ||
+      BLEND_EQUATIONS[op] === undefined
     )
+      warn(`${source.path}: unknown blend factors; using normal alpha blending.`)
+    else if (blend.src === 5 && blend.dst === 10 && op === 0) result.blending = THREE.NormalBlending
+    else if (blend.src === 5 && blend.dst === 1 && op === 0)
       result.blending = THREE.AdditiveBlending
-    else if (
-      floats._DstBlend !== undefined &&
-      !(number(floats._SrcBlend) === 5 && number(floats._DstBlend) === 10)
-    )
-      warn(`${source.path}: blend factors are approximated as normal alpha blending.`)
+    else {
+      result.blending = THREE.CustomBlending
+      result.blendSrc = BLEND_FACTORS[blend.src]!
+      result.blendDst = BLEND_FACTORS[blend.dst]! as THREE.BlendingDstFactor
+      result.blendEquation = BLEND_EQUATIONS[op]!
+    }
     warn(
       `${source.path}: Unity shader ${shader} is replaced with a Quarks unlit particle material; custom shader effects are not converted.`,
     )
@@ -630,7 +1089,9 @@ async function convertPrefab(
           )
           texture = new THREE.Texture()
           texture.name = image.path
-          texture.colorSpace = THREE.SRGBColorSpace
+          // Quarks' unlit particle shader does not encode its output, so decoding sRGB texels
+          // would darken them; raw sampling reproduces Unity's displayed texture colors.
+          texture.colorSpace = THREE.NoColorSpace
           textureUrls.set(texture.uuid, url)
           textureCache.set(textureId, texture)
           if (image.meta) {
@@ -644,7 +1105,6 @@ async function convertPrefab(
                   : THREE.RepeatWrapping
             texture.wrapS = wrap(settings.wrapU ?? settings.wrapMode)
             texture.wrapT = wrap(settings.wrapV ?? settings.wrapMode)
-            if (number(importer.sRGBTexture, 1) === 0) texture.colorSpace = THREE.NoColorSpace
             if (number(settings.filterMode, 1) === 0) {
               texture.magFilter = THREE.NearestFilter
               texture.minFilter = THREE.NearestFilter
@@ -723,7 +1183,6 @@ async function convertPrefab(
         startDelay = record(data.startDelay),
         renderer = renderers.get(id) ?? {}
       const delayMode = number(startDelay.minMaxState)
-      const delay = delayMode === 0 ? Math.max(0, number(startDelay.scalar)) : 0
       const value = (input: unknown, fallback: number, label: string, factor = 1, offset = 0) =>
         scalar(input, fallback, localWarn, label, factor, offset)
       const mode = number(renderer.m_RenderMode)
@@ -767,11 +1226,9 @@ async function convertPrefab(
                   value(size.y, 1, 'Size Y'),
                   value(size.z, 1, 'Size Z'),
                 )
-              : lifetimeValue(
-                  value(size.curve, 1, 'Size over Lifetime'),
-                  localWarn,
-                  'Size over Lifetime',
-                ),
+              : // Quarks' runtime and JSON loader accept per-particle value generators here,
+                // although its TypeScript signature only lists function generators.
+                (value(size.curve, 1, 'Size over Lifetime') as unknown as PiecewiseBezier),
           ),
         )
       const gravity = record(initial.gravityModifier)
@@ -795,6 +1252,8 @@ async function convertPrefab(
         localWarn(
           'Gravity Modifier: using Unity default gravity (-9.81 m/s²); project settings are not in the package.',
         )
+      if (hasGravity && [1, 2].includes(gravityMode))
+        localWarn('Gravity Modifier: the curve is evaluated over particle age, not system time.')
       const rotation = record(data.RotationModule)
       if (enabled(rotation.enabled)) {
         if (geometry)
@@ -822,25 +1281,29 @@ async function convertPrefab(
       }
       const force = record(data.ForceModule)
       if (enabled(force.enabled)) {
-        if (
-          ![0, 1].includes(simulationSpace) ||
-          enabled(force.inWorldSpace) !== (simulationSpace === 1)
-        )
-          localWarn(
-            'Force: world/local force space differs from simulation space and is not converted.',
-          )
-        else {
-          behaviors.push(
-            new ForceOverLife(
-              scalar(force.x, 0, localWarn, 'Force X'),
-              scalar(force.y, 0, localWarn, 'Force Y'),
-              scalar(force.z, 0, localWarn, 'Force Z', -1),
-            ),
-          )
+        // Quarks ForceOverLife is a world-space acceleration in both simulation spaces.
+        const forceBehavior = enabled(force.inWorldSpace)
+          ? new ForceOverLife(
+              value(force.x, 0, 'Force X'),
+              value(force.y, 0, 'Force Y'),
+              value(force.z, 0, 'Force Z', -1),
+            )
+          : localForce(force, parent, (input, axis, factor) =>
+              value(input, 0, `Force ${axis}`, factor),
+            )
+        if (forceBehavior) {
+          behaviors.push(forceBehavior)
           convertedModules.add('ForceModule')
+          if (!enabled(force.inWorldSpace))
+            localWarn(
+              'Force: local-space direction is baked from the prefab hierarchy and does not follow runtime rotation of the effect.',
+            )
           if (enabled(force.randomizePerFrame))
             localWarn('Force: per-frame randomization is approximated by per-particle values.')
-        }
+        } else
+          localWarn(
+            'Force: local-space curves/random values under a non-axis-aligned rotation cannot be represented.',
+          )
       }
       const noise = record(data.NoiseModule)
       if (enabled(noise.enabled)) {
@@ -889,7 +1352,8 @@ async function convertPrefab(
         else {
           behaviors.push(
             new LimitSpeedOverLife(
-              lifetimeValue(value(limit.magnitude, 1, 'Speed limit'), localWarn, 'Speed limit'),
+              // Runtime/JSON accept value generators; see SizeOverLife above.
+              value(limit.magnitude, 1, 'Speed limit') as unknown as PiecewiseBezier,
               Math.max(0, Math.min(1, number(limit.dampen, 1))),
             ),
           )
@@ -902,43 +1366,9 @@ async function convertPrefab(
         )
           localWarn('Limit Velocity: drag is not converted.')
       }
-      const uv = record(data.UVModule)
-      const gridUV = enabled(uv.enabled) && number(uv.mode) === 0
-      const tilesX = gridUV ? Math.max(1, number(uv.tilesX, 1)) : 1
-      const tilesY = gridUV ? Math.max(1, number(uv.tilesY, 1)) : 1
-      let startTileIndex: Scalar = gridUV
-        ? value(uv.startFrame, 0, 'Start Frame', tilesX * tilesY)
-        : new ConstantValue(0)
-      if (startTileIndex instanceof PiecewiseBezier) {
-        localWarn('Texture Sheet: start-frame curve is sampled at time zero.')
-        startTileIndex = new ConstantValue(startTileIndex.genValue([], 0))
-      } else if (startTileIndex instanceof IntervalValue) {
-        localWarn('Start Frame: random constants are approximated by their maximum value.')
-        startTileIndex = new ConstantValue(startTileIndex.b)
-      }
-      if (gridUV) {
-        if (
-          number(uv.animationType) !== 0 ||
-          number(uv.timeMode) !== 0 ||
-          number(uv.cycles, 1) !== 1
-        )
-          localWarn(
-            'Texture Sheet: single-row, speed/FPS time and repeated cycles are approximated as whole-sheet lifetime animation.',
-          )
-        behaviors.push(
-          new FrameOverLife(
-            offsetFrames(
-              lifetimeValue(
-                value(uv.frameOverTime, 1, 'Frame over Time', tilesX * tilesY),
-                localWarn,
-                'Frame over Time',
-              ),
-              startTileIndex.value,
-            ),
-          ),
-        )
-      } else if (enabled(uv.enabled))
-        localWarn('Sprite-based texture sheet animation is not converted.')
+      const startLife = value(initial.startLifetime, 5, 'Start Lifetime')
+      const sheet = textureSheet(record(data.UVModule), startLife, localWarn)
+      if (sheet.frame) behaviors.push(new FrameOverLife(sheet.frame))
       for (const [key, module] of Object.entries(data))
         if (
           key.endsWith('Module') &&
@@ -962,82 +1392,131 @@ async function convertPrefab(
         localWarn(`Unknown simulation space ${simulationSpace}; using local space.`)
       if (simulationSpace === 2 || fileId(data.moveWithCustomTransform) !== '0')
         localWarn('Custom simulation-space transform is not converted.')
-      if (delayMode !== 0) localWarn('Random/curve start delay is not converted.')
-      if (
-        delay > 0 &&
-        enabled(emission.enabled) &&
-        ['rateOverTime', 'rateOverDistance'].some((key) => {
-          const input =
-            key === 'rateOverTime' ? (emission.rateOverTime ?? emission.rate) : emission[key]
-          if (typeof input === 'number') return input !== 0
-          const rate = record(input)
-          return number(rate.minMaxState) !== 0 || number(rate.scalar) !== 0
-        })
-      )
-        localWarn('Start delay: continuous emission starts immediately; only bursts are delayed.')
       if (!geometry && enabled(initial.rotation3D))
         localWarn('3D start rotation is approximated by its Z component.')
       if (enabled(initial.randomizeRotationDirection))
         localWarn('Randomized rotation direction is not converted.')
-      localWarn(
-        'Unity maxParticles, culling, scaling modes and exact random seeds are not reproduced by Quarks.',
-      )
       const activeEmission = enabled(emission.enabled)
+      const duration = Math.max(0, number(data.lengthInSec, 5))
+      const looping = enabled(data.looping)
+      // Unity start delay is a constant or a random constant; curves are not allowed by Unity.
+      let delay = 0
+      if (typeof data.startDelay === 'number' || typeof data.startDelay === 'bigint')
+        delay = number(data.startDelay)
+      else if (delayMode === 0) delay = number(startDelay.scalar)
+      else if (delayMode === 3) {
+        delay = (number(startDelay.scalar) + number(startDelay.minScalar)) / 2
+        localWarn('Start delay: a random delay is approximated by its midpoint.')
+      } else localWarn(`Start delay: unsupported mode ${delayMode} is not converted.`)
+      delay = Math.max(0, delay)
+      // Non-looping: the timeline is extended by the delay and emission is gated until it ends.
+      // Looping: Unity's delayed phase repeats every cycle, so curves/bursts are phase-shifted.
+      const systemDuration = !looping && delay ? duration + delay : duration
+      const delayStart = !looping && delay ? delay / systemDuration : 0
+      const phase = looping && delay && duration > 0 ? (delay % duration) / duration : 0
+      const continuous =
+        activeEmission &&
+        [emission.rateOverTime ?? emission.rate, emission.rateOverDistance].some((input) => {
+          if (typeof input === 'number' || typeof input === 'bigint') return number(input) !== 0
+          const rate = record(input)
+          return number(rate.minMaxState) !== 0 || number(rate.scalar) !== 0
+        })
+      let wrappedBurst = false
+      const systemValue = (generator: Scalar, gate = false): Scalar => {
+        if (looping)
+          return generator instanceof PiecewiseBezier ? phaseCurve(generator, phase) : generator
+        if (!delayStart) return generator
+        if (generator instanceof PiecewiseBezier)
+          return delayCurve(generator, delayStart, gate ? 0 : undefined)
+        if (!gate) return generator
+        if (generator instanceof IntervalValue)
+          localWarn('Start delay: a random emission rate is gated using its midpoint.')
+        const rate = scalarMid(generator)
+        return toCurve([flatPiece(0, 0, delayStart), flatPiece(rate, delayStart, 1)])
+      }
+      const timed = (input: unknown, fallback: number, label: string, factor = 1, offset = 0) =>
+        systemValue(value(input, fallback, label, factor, offset))
+      const bursts: {
+        time: number
+        count: Scalar
+        cycle: number
+        interval: number
+        probability: number
+      }[] = []
+      for (const burst of activeEmission ? array(emission.m_Bursts).map(record) : []) {
+        const time = number(burst.time)
+        // Unity serializes infinite repetition as cycleCount 0.
+        const cycles = Math.floor(number(burst.cycleCount, 1))
+        const interval = number(burst.repeatInterval, 0)
+        // Quarks 0.17.1 fires each burst once per loop and ignores cycle/interval: expand them.
+        for (let k = 0; cycles <= 0 || k < cycles; k++) {
+          const at = time + k * interval
+          // In a loop, time `duration` is the next cycle's time 0, which already has this burst.
+          if (at > duration || (looping && k > 0 && at >= duration) || (k > 0 && !(interval > 0)))
+            break
+          if (bursts.length >= 10000)
+            throw new Error(`${label}: burst repetitions exceed 10000 per Particle System.`)
+          if (looping && at + delay >= duration) wrappedBurst = true
+          bursts.push({
+            time: looping ? (duration > 0 ? (at + delay) % duration : at) : at + delay,
+            count: burst.countCurve
+              ? value(burst.countCurve, 1, 'Burst count')
+              : new IntervalValue(number(burst.minCount, 1), number(burst.maxCount, 1)),
+            cycle: 1,
+            interval: Math.max(0, interval),
+            probability: number(burst.probability, 1),
+          })
+        }
+      }
+      // Quarks scans bursts in array order and stops at the first future burst.
+      bursts.sort((a, b) => a.time - b.time)
+      // Before the delay ends, Unity emits nothing; a phase-shifted loop already emits then.
+      if (looping && delay > 0 && (continuous || wrappedBurst))
+        localWarn(
+          'Start delay: the first looping cycle begins immediately rather than after the delay.',
+        )
       const system = new ParticleSystem({
         material: mat,
         instancingGeometry: geometry,
         autoDestroy: false,
-        duration: number(data.lengthInSec, 5),
-        looping: enabled(data.looping),
+        duration: systemDuration,
+        looping,
         prewarm: enabled(data.prewarm),
         worldSpace: simulationSpace === 1,
         shape: shape(data.ShapeModule, localWarn, !!geometry),
-        startLife: value(initial.startLifetime, 5, 'Start Lifetime'),
-        startSpeed: value(initial.startSpeed, 5, 'Start Speed'),
+        startLife: systemValue(startLife),
+        startSpeed: timed(initial.startSpeed, 5, 'Start Speed'),
         startSize: enabled(initial.size3D)
           ? new Vector3Function(
-              value(initial.startSize, 1, 'Start Size X'),
-              value(initial.startSizeY, 1, 'Start Size Y'),
-              value(initial.startSizeZ, 1, 'Start Size Z'),
+              timed(initial.startSize, 1, 'Start Size X'),
+              timed(initial.startSizeY, 1, 'Start Size Y'),
+              timed(initial.startSizeZ, 1, 'Start Size Z'),
             )
-          : value(initial.startSize, 1, 'Start Size'),
+          : timed(initial.startSize, 1, 'Start Size'),
         // Preserve mesh orientation when replacing the reflected emitter with an X half-turn.
         startRotation: geometry
           ? enabled(initial.rotation3D)
             ? new EulerGenerator(
-                value(initial.startRotationX, 0, 'Start Rotation X', -1),
-                value(initial.startRotationY, 0, 'Start Rotation Y'),
-                value(initial.startRotation, 0, 'Start Rotation Z', -1, Math.PI),
+                timed(initial.startRotationX, 0, 'Start Rotation X', -1),
+                timed(initial.startRotationY, 0, 'Start Rotation Y'),
+                timed(initial.startRotation, 0, 'Start Rotation Z', -1, Math.PI),
                 'YXZ',
               )
             : new EulerGenerator(
                 new ConstantValue(0),
-                value(initial.startRotation, 0, 'Start Rotation'),
+                timed(initial.startRotation, 0, 'Start Rotation'),
                 new ConstantValue(Math.PI),
                 'YXZ',
               )
-          : value(initial.startRotation, 0, 'Start Rotation', -1),
+          : timed(initial.startRotation, 0, 'Start Rotation', -1),
         startColor: color(initial.startColor, localWarn, 'Start Color'),
         emissionOverTime: activeEmission
-          ? value(emission.rateOverTime ?? emission.rate, 10, 'Emission rate')
+          ? systemValue(value(emission.rateOverTime ?? emission.rate, 10, 'Emission rate'), true)
           : new ConstantValue(0),
         emissionOverDistance: activeEmission
-          ? value(emission.rateOverDistance, 0, 'Distance emission')
+          ? systemValue(value(emission.rateOverDistance, 0, 'Distance emission'), true)
           : new ConstantValue(0),
-        emissionBursts: activeEmission
-          ? array(emission.m_Bursts).map((burst) => {
-              const b = record(burst)
-              return {
-                time: number(b.time) + delay,
-                count: b.countCurve
-                  ? value(b.countCurve, 1, 'Burst count')
-                  : new IntervalValue(number(b.minCount, 1), number(b.maxCount, 1)),
-                cycle: number(b.cycleCount, 1),
-                interval: number(b.repeatInterval, 1),
-                probability: number(b.probability, 1),
-              }
-            })
-          : [],
+        emissionBursts: bursts,
         renderMode,
         renderOrder: number(renderer.m_SortingOrder),
         rendererEmitterSettings:
@@ -1047,9 +1526,9 @@ async function convertPrefab(
                 lengthFactor: number(renderer.m_LengthScale, 2),
               }
             : {},
-        uTileCount: tilesX,
-        vTileCount: tilesY,
-        startTileIndex,
+        uTileCount: sheet.tilesX,
+        vTileCount: sheet.tilesY,
+        startTileIndex: sheet.startTileIndex,
         behaviors,
       })
       systems.push(system)
@@ -1058,15 +1537,33 @@ async function convertPrefab(
       system.emitter.visible = mode !== 5 && enabled(renderer.m_Enabled ?? 1)
       for (let ancestor: THREE.Object3D | null = parent; ancestor; ancestor = ancestor.parent)
         system.emitter.visible &&= ancestor.visible
+      const shapeData = record(data.ShapeModule)
+      const shapeEnabled = enabled(shapeData.enabled)
       // Negative emitter scale makes Quarks world-space positions and velocities disagree.
-      system.emitter.rotation.x = Math.PI
       // Unity Edge emits along +Y, while the native grid emits along +Z.
-      if (
-        !geometry &&
-        enabled(record(data.ShapeModule).enabled) &&
-        number(record(data.ShapeModule).type) === 12
+      const basis = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(1, 0, 0),
+        !geometry && shapeEnabled && number(shapeData.type) === 12 ? -Math.PI / 2 : Math.PI,
       )
-        system.emitter.rotation.x = -Math.PI / 2
+      // Shape position/rotation move spawn positions and directions within the system; they are
+      // applied to the emitter with the same Z reflection as GameObject transforms.
+      const offset = record(shapeData.m_Position)
+      const euler = record(shapeData.m_Rotation)
+      const shapeRotation = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(
+          THREE.MathUtils.degToRad(number(euler.x)),
+          THREE.MathUtils.degToRad(number(euler.y)),
+          THREE.MathUtils.degToRad(number(euler.z)),
+          'YXZ', // Unity applies Z, then X, then Y.
+        ),
+      )
+      if (shapeEnabled) {
+        system.emitter.position.set(number(offset.x), number(offset.y), -number(offset.z))
+        shapeRotation.set(-shapeRotation.x, -shapeRotation.y, shapeRotation.z, shapeRotation.w)
+      } else shapeRotation.identity()
+      system.emitter.quaternion.copy(shapeRotation).multiply(basis)
+      if (geometry && Math.abs(shapeRotation.w) < 1 - 1e-9)
+        localWarn('Shape: rotation also rotates mesh particle orientation in Quarks.')
       parent.add(system.emitter)
     }
     for (const doc of particles) {
@@ -1076,6 +1573,8 @@ async function convertPrefab(
       const label = owner.emitter.name
       const localWarn: Warn = (message) => warn(`${label}: ${message}`)
       for (const subEmitter of array(module.subEmitters).map(record)) {
+        // Unity keeps empty sub-emitter slots as fileID 0; they emit nothing.
+        if (fileId(subEmitter.emitter) === '0') continue
         const target = systemsByUnityId.get(fileId(subEmitter.emitter))
         if (!target) {
           localWarn(
@@ -1107,6 +1606,9 @@ async function convertPrefab(
         )
       }
     }
+    warn(
+      'Unity maxParticles, culling, scaling modes and exact random seeds are not reproduced by Quarks.',
+    )
     root.userData.unityImport = {
       source: asset.path,
       warnings: [...warnings],

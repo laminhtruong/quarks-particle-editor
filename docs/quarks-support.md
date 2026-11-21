@@ -15,7 +15,9 @@ shape, and generator, and simulate every behavior with stock Quarks.
 - Start lifetime, speed, size (including XYZ), rotation (including quaternion
   generators), and all start color generators.
 - Emission over time/distance with scalar generator modes.
-- Any number of bursts: time, count generator, cycles, interval, and probability.
+- Any number of bursts: time, count generator, and probability. Quarks 0.17.1 serializes
+  cycles/interval but never plays them, so the editor shows them read-only; add bursts
+  instead. Bursts are kept sorted by time because the runtime stops at the first future burst.
 - Root position/rotation/scale and selected emitter position/rotation/scale.
 - Add, duplicate, remove, and reorder emitters. Sub-emitter references are selected
   from the current effect; dangling and cyclic links are rejected.

@@ -189,6 +189,22 @@ Material:
         m_Offset: {x: 0.1, y: 0.2}
 `
 
+// Hand-authored ShaderLab declaring the properties and blend state its material relies on.
+export const particleShader = `Shader "Particles/Additive" {
+  Properties {
+    [HDR] _TintColor ("Tint Color", Color) = (0.5,0.5,0.5,0.5)
+    _MainTex ("Particle Texture", 2D) = "white" {}
+    [HideInInspector] _SrcBlend ("__src", Float) = 5.0
+    [HideInInspector] _DstBlend ("__dst", Float) = 1.0
+  }
+  SubShader {
+    Pass {
+      Blend [_SrcBlend] [_DstBlend]
+      ZWrite Off
+    }
+  }
+}`
+
 export function tar(entries: Record<string, string | Uint8Array>): Uint8Array<ArrayBuffer> {
   const chunks: Uint8Array[] = []
   const encode = new TextEncoder()
@@ -236,6 +252,6 @@ export function packageEntries(text = prefab): Record<string, string> {
     [`${textureGuid}/asset.meta`]:
       'TextureImporter:\n  sRGBTexture: 1\n  textureSettings: {wrapU: 0, wrapV: 1, filterMode: 0}',
     '44444444444444444444444444444444/pathname': 'Assets/Shaders/Particles.shader',
-    '44444444444444444444444444444444/asset': 'Shader "Particles/Additive" {}',
+    '44444444444444444444444444444444/asset': particleShader,
   }
 }

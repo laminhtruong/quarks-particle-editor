@@ -154,6 +154,10 @@ export function prepareNativeDocument(json: QuarksDocument): void {
       generator(ps.startSize, [...scalarTypes, 'Vector3Function'], 'startSize')
       generator(ps.startRotation, [...scalarTypes, ...rotationTypes], 'startRotation')
       generator(ps.startColor, colorTypes, 'startColor')
+      // three.quarks scans bursts in array order and stops at the first one still in the future,
+      // so an earlier burst listed after a later one would never fire.
+      if (Array.isArray(ps.emissionBursts))
+        (ps.emissionBursts as NativeRecord[]).sort((a, b) => Number(a.time) - Number(b.time))
       if (ps.layers === 0)
         throw new Error('Quarks 0.17.1 cannot restore layer mask 0. Use a nonzero layer mask.')
       if (typeof ps.startTileIndex !== 'number')

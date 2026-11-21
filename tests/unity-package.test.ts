@@ -396,8 +396,7 @@ describe('Unity package import', () => {
     const { json, warnings } = await load(text)
     const ps = (json.object as any).children[0].children[1].ps
     const limit = ps.behaviors.find((b: any) => b.type === 'LimitSpeedOverLife')
-    expect(limit).toMatchObject({ dampen: 0.6, speed: { type: 'PiecewiseBezier' } })
-    expect(limit.speed.functions[0].function.p0).toBe(2)
+    expect(limit).toMatchObject({ dampen: 0.6, speed: { type: 'ConstantValue', value: 2 } })
     expect(warnings.join('\n')).toContain('drag is not converted')
     expect(warnings.join('\n')).not.toContain('ClampVelocityModule is enabled but not converted')
     const separate = await load(text.replace('dampen: 0.6', 'separateAxis: 1\n    dampen: 0.6'))
@@ -417,13 +416,16 @@ describe('Unity package import', () => {
       z: { value: -3 },
     })
     expect(force.warnings.join('\n')).not.toContain('ForceModule is enabled but not converted')
-    const mismatchedForce = await load(forceText.replace('inWorldSpace: 1', 'inWorldSpace: 0'))
-    expect(mismatchedForce.warnings.join('\n')).toContain(
-      'Force: world/local force space differs from simulation space',
-    )
-    expect(mismatchedForce.warnings.join('\n')).toContain(
-      'ForceModule is enabled but not converted',
-    )
+    // A local force on an unrotated GameObject is the same reflected world vector.
+    const localForce = await load(forceText.replace('inWorldSpace: 1', 'inWorldSpace: 0'))
+    const localPS = (localForce.json.object as any).children[0].children[1].ps
+    expect(localPS.behaviors.find((b: any) => b.type === 'ForceOverLife')).toMatchObject({
+      x: { value: 1 },
+      y: { value: 2 },
+      z: { value: -3 },
+    })
+    expect(localForce.warnings.join('\n')).toContain('local-space direction is baked')
+    expect(localForce.warnings.join('\n')).not.toContain('ForceModule is enabled but not converted')
 
     const noise = await load(
       prefab.replace(
@@ -796,13 +798,15 @@ describe('Unity package import', () => {
     expect(ps.shape).toMatchObject({ type: 'cone', radius: 0.25, arc: -Math.PI })
     expect(ps.shape.angle).toBeCloseTo(Math.PI / 6)
     expect(ps.emissionOverTime.value).toBe(20)
+    // Two Unity cycles become two native bursts: Quarks ignores burst cycle/interval.
+    expect(ps.emissionBursts).toHaveLength(2)
     expect(ps.emissionBursts[0]).toMatchObject({
       time: 0.5,
-      cycle: 2,
-      interval: 0.3,
+      cycle: 1,
       probability: 0.8,
       count: { type: 'IntervalValue', a: 4, b: 8 },
     })
+    expect(ps.emissionBursts[1].time).toBeCloseTo(0.8)
     expect(ps.behaviors.map((b: any) => b.type)).toEqual([
       'ColorOverLife',
       'SizeOverLife',
@@ -856,9 +860,9 @@ describe('Unity package import', () => {
       )
     const { json } = await load(text)
     const ps = (json.object as any).children[0].children[1].ps
-    const frame = ps.behaviors.find((behavior: any) => behavior.type === 'FrameOverLife').frame
+    // A constant frame is a start tile; FrameOverLife would be redundant.
     expect(ps.startTileIndex.value).toBe(4)
-    expect(frame.functions[0].function).toMatchObject({ p0: 4, p3: 4 })
+    expect(ps.behaviors.some((behavior: any) => behavior.type === 'FrameOverLife')).toBe(false)
   })
 
   it('loads and simulates the converted document with stock Quarks', async () => {
@@ -947,7 +951,7 @@ describe('Unity package import', () => {
     expect(result.json.images).toEqual([])
   })
 
-  it('converts scalar lifetime modules to evaluable curves, warning on approximations', async () => {
+  it('keeps per-particle random lifetime constants and phase-shifts looping start delays', async () => {
     const text = prefab
       .replace(
         'minMaxState: 1\n      scalar: 2',
@@ -958,11 +962,11 @@ describe('Unity package import', () => {
         'NoiseModule: {enabled: 0}\n  startDelay: {minMaxState: 0, scalar: 2}',
       )
     const result = await load(text)
-    expect(result.warnings.join('\n')).toContain('random constants')
-    expect(result.warnings.join('\n')).toContain('Start delay')
+    expect(result.warnings.join('\n')).not.toContain('random constants')
+    expect(result.warnings.join('\n')).toContain('first looping cycle begins immediately')
     const emitter = (result.json.object as any).children[0].children[1]
-    expect(emitter.ps.emissionBursts[0].time).toBe(2.5)
-    expect(emitter.ps.behaviors[1].size.type).toBe('PiecewiseBezier')
+    expect(emitter.ps.emissionBursts.map((burst: any) => burst.time)).toEqual([2.5, 2.8])
+    expect(emitter.ps.behaviors[1].size).toEqual({ type: 'IntervalValue', a: 1, b: 2 })
   })
 
   it('applies Unity gravity as world-down acceleration in rotated local simulation', async () => {
