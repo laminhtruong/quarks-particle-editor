@@ -3,6 +3,7 @@ import {
   AdditiveBlending,
   CustomBlending,
   NoColorSpace,
+  NormalBlending,
   OneFactor,
   OneMinusSrcAlphaFactor,
   ReverseSubtractEquation,
@@ -328,6 +329,64 @@ describe('Unity materials', () => {
     )
     expect(m.transparent ?? false).toBe(false)
     expect(m.alphaTest).toBe(0.3)
+  })
+
+  const staleStandard = `  m_SavedProperties:
+    m_Floats:
+    - _SrcBlend: 1
+    - _DstBlend: 0
+    - _ZWrite: 1
+    m_Colors:
+    - _Color: {r: 1, g: 1, b: 1, a: 1}
+    - _TintColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}`
+
+  it('uses the fixed blending of built-in UI/Default, ignoring stale Standard blend floats', async () => {
+    const { material: m } = await loadMaterial(
+      material(staleStandard, '{fileID: 10770, guid: 0000000000000000f000000000000000, type: 0}'),
+    )
+    expect(m.blending).toBe(NormalBlending)
+    expect(m.transparent).toBe(true)
+    expect(m.depthWrite).toBe(false)
+    expect(m.color).toBe(0xffffff)
+  })
+
+  it('renders built-in Mobile/Particles/Additive additively and untinted', async () => {
+    const { material: m } = await loadMaterial(
+      material(staleStandard, '{fileID: 10720, guid: 0000000000000000f000000000000000, type: 0}'),
+    )
+    expect(m.blending).toBe(AdditiveBlending)
+    expect(m.color).toBe(0xffffff)
+  })
+
+  it('does not turn an unavailable shader opaque from unverifiable stale floats', async () => {
+    const unavailable = '{fileID: 4800000, guid: 88888888888888888888888888888888, type: 3}'
+    const opaque = await loadMaterial(material(staleStandard, unavailable))
+    expect(opaque.material.transparent).toBe(true)
+    expect(opaque.material.blending).toBe(NormalBlending)
+    expect(opaque.material.depthWrite).toBe(false)
+    expect(opaque.warnings.join('\n')).toContain('may be stale')
+    // Deliberate non-default blend floats are still used.
+    const additive = await loadMaterial(
+      material(
+        '  m_SavedProperties:\n    m_Floats:\n    - _SrcBlend: 5\n    - _DstBlend: 1',
+        unavailable,
+      ),
+    )
+    expect(additive.material.blending).toBe(AdditiveBlending)
+  })
+
+  it('ignores blend floats that the available shader does not declare', async () => {
+    const shaderGuid = '99999999999999999999999999999999'
+    const { material: m } = await loadMaterial(
+      material(staleStandard, `{fileID: 4800000, guid: ${shaderGuid}, type: 3}`),
+      {
+        [`${shaderGuid}/pathname`]: 'Assets/Shaders/UIAdd.shader',
+        [`${shaderGuid}/asset`]:
+          'Shader "Test/UIAdd" {\n  Properties {\n    _MainTex ("Tex", 2D) = "white" {}\n    _Color ("Tint", Color) = (1,1,1,1)\n  }\n  SubShader { Pass {\n    ZWrite Off\n    Blend SrcAlpha One\n  } }\n}',
+      },
+    )
+    expect(m.blending).toBe(AdditiveBlending)
+    expect(m.depthWrite).toBe(false)
   })
 
   it('reads a fixed-function Blend directive when the material has no blend floats', async () => {

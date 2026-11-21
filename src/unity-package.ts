@@ -46,6 +46,8 @@ interface UnityObject {
   id: string
   type: string
   value: RecordValue
+  /** A placeholder for an object supplied by a prefab instance (`--- !u!N &id stripped`). */
+  stripped?: boolean
 }
 interface Asset {
   path: string
@@ -232,7 +234,7 @@ function objects(asset: Asset): UnityObject[] {
     throw new Error(
       `${asset.path}: binary assets are not supported. Re-export with Asset Serialization set to Force Text.`,
     )
-  const headers = [...text.matchAll(/^--- !u!\d+ &(-?\d+)(?: stripped)?\s*\r?$/gm)]
+  const headers = [...text.matchAll(/^--- !u!\d+ &(-?\d+)( stripped)?\s*\r?$/gm)]
   if (!headers.length || headers.length > 20000)
     throw new Error(`${asset.path}: invalid Unity object count.`)
   const ids = new Set<string>()
@@ -242,8 +244,191 @@ function objects(asset: Asset): UnityObject[] {
     ids.add(id)
     const body = yaml(text.slice(header.index! + header[0].length, headers[index + 1]?.index))
     const type = Object.keys(body)[0] ?? ''
-    return { id, type, value: record(body[type]) }
+    return { id, type, value: record(body[type]), ...(header[2] ? { stripped: true } : {}) }
   })
+}
+
+/**
+ * A UIParticle (ParticleEffectForUGUI) component, recognized by its serialized fields: it
+ * renders the listed Particle Systems on a UI canvas with an extra presentation scale.
+ */
+const isUIParticle = (doc: UnityObject) =>
+  doc.type === 'MonoBehaviour' &&
+  Array.isArray(doc.value.m_Particles) &&
+  (doc.value.m_Scale3D !== undefined || doc.value.m_Scale !== undefined)
+
+const FILE_ID_MASK = (1n << 63n) - 1n
+/** Unity's fileID for an object of a prefab instance: (instance ^ source object) & 0x7FFF…FFFF. */
+const instanceObjectId = (instance: string, source: string) =>
+  String((BigInt(instance) ^ BigInt(source)) & FILE_ID_MASK)
+
+/** Rewrites local references ({fileID} without a GUID) inside a serialized object tree. */
+function remapReferences(value: unknown, map: (id: string) => string): unknown {
+  if (Array.isArray(value)) return value.map((item) => remapReferences(item, map))
+  if (value === null || typeof value !== 'object') return value
+  const data = value as RecordValue
+  const result: RecordValue = {}
+  for (const [key, item] of Object.entries(data)) result[key] = remapReferences(item, map)
+  if ('fileID' in data && !guid(data) && fileId(data) !== '0') result.fileID = map(fileId(data))
+  return result
+}
+
+const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+
+/**
+ * Applies one prefab modification. Property paths are Unity SerializedProperty paths: fields
+ * separated by dots, with `Array.size` and `Array.data[i]` addressing serialized arrays.
+ */
+function applyModification(target: RecordValue, path: string, apply: (old: unknown) => unknown) {
+  const parts = path.split('.')
+  if (parts.some((part) => UNSAFE_KEYS.has(part))) return false
+  let container: RecordValue | unknown[] = target
+  let key: string | number = parts[0]!
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i]!
+    if (part !== 'Array') {
+      const child = record(container)[key as string] ?? (container as unknown[])[key as number]
+      if (!child || typeof child !== 'object') {
+        const created = {}
+        ;(container as RecordValue)[key as string] = created
+        container = created
+      } else container = child as RecordValue
+      key = part
+      continue
+    }
+    const element = parts[++i] ?? ''
+    let list = (container as RecordValue)[key as string]
+    if (!Array.isArray(list)) (container as RecordValue)[key as string] = list = []
+    const items = list as unknown[]
+    if (element === 'size') {
+      if (i !== parts.length - 1) return false
+      const size = Math.floor(number(apply(items.length)))
+      if (!(size >= 0 && size <= 100000)) throw new Error('Prefab override array size is invalid.')
+      while (items.length > size) items.pop()
+      while (items.length < size)
+        items.push(items.length ? structuredClone(items[items.length - 1]) : {})
+      return true
+    }
+    const index = /^data\[(\d+)\]$/.exec(element)?.[1]
+    if (index === undefined || Number(index) >= 100000) return false
+    while (items.length <= Number(index)) items.push({})
+    container = items
+    key = Number(index)
+  }
+  const holder = container as RecordValue & unknown[]
+  holder[key as never] = apply(holder[key as never]) as never
+  return true
+}
+
+/**
+ * The effective objects of a prefab, with prefab instances (variants and nested prefabs) merged
+ * from their source prefabs: source objects receive Unity's instance fileIDs, property
+ * modifications, removed components/GameObjects and the instance's transform parent.
+ */
+function resolvePrefabObjects(
+  asset: Asset,
+  assets: ReadonlyMap<string, Asset>,
+  warn: Warn,
+  stack: readonly string[] = [],
+): UnityObject[] {
+  if (stack.length > 16) throw new Error(`${asset.path}: prefab nesting is too deep or cyclic.`)
+  const docs = objects(asset)
+  const instances = docs.filter((doc) => doc.type === 'PrefabInstance')
+  if (!instances.length) return docs
+  const result = docs.filter((doc) => !doc.stripped && doc.type !== 'PrefabInstance')
+  const ids = new Set(result.map((doc) => doc.id))
+  for (const instance of instances) {
+    const sourceGuid = guid(instance.value.m_SourcePrefab)
+    const source = assets.get(sourceGuid)
+    if (!source || !/\.prefab$/i.test(source.path))
+      throw new Error(
+        `${asset.path}: source prefab ${sourceGuid || '(missing)'} of a prefab variant/nested prefab is not in the package. Export with Include dependencies enabled.`,
+      )
+    if (stack.includes(sourceGuid)) throw new Error(`${asset.path}: cyclic prefab reference.`)
+    const modification = record(instance.value.m_Modification)
+    const removed = new Set(
+      array(modification.m_RemovedComponents)
+        .map(record)
+        .filter((target) => guid(target) === sourceGuid)
+        .map((target) => fileId(target)),
+    )
+    const removedObjects = new Set(
+      array(modification.m_RemovedGameObjects)
+        .map(record)
+        .filter((target) => guid(target) === sourceGuid)
+        .map((target) => fileId(target)),
+    )
+    let sourceDocs = resolvePrefabObjects(source, assets, warn, [...stack, sourceGuid])
+    if (removedObjects.size) {
+      // Removing a GameObject removes its components and its whole child hierarchy.
+      const owner = new Map(
+        sourceDocs
+          .filter((doc) => doc.type === 'Transform' || doc.type === 'RectTransform')
+          .map((doc) => [doc.id, fileId(doc.value.m_GameObject)]),
+      )
+      let grew = true
+      while (grew) {
+        grew = false
+        for (const doc of sourceDocs) {
+          const parentObject = owner.get(fileId(doc.value.m_Father))
+          const object = owner.get(doc.id)
+          if (
+            object &&
+            parentObject &&
+            removedObjects.has(parentObject) &&
+            !removedObjects.has(object)
+          ) {
+            removedObjects.add(object)
+            grew = true
+          }
+        }
+      }
+    }
+    sourceDocs = sourceDocs.filter(
+      (doc) =>
+        !removed.has(doc.id) &&
+        !removedObjects.has(doc.id) &&
+        !removedObjects.has(fileId(doc.value.m_GameObject)),
+    )
+    const map = (id: string) => instanceObjectId(instance.id, id)
+    const merged = new Map(
+      sourceDocs.map((doc) => [
+        map(doc.id),
+        { id: map(doc.id), type: doc.type, value: remapReferences(doc.value, map) as RecordValue },
+      ]),
+    )
+    for (const change of array(modification.m_Modifications).map(record)) {
+      const target = record(change.target)
+      const doc = guid(target) === sourceGuid ? merged.get(map(fileId(target))) : undefined
+      const path = String(change.propertyPath ?? '')
+      if (!doc || !path) continue
+      const reference = record(change.objectReference)
+      const applied = applyModification(doc.value, path, (old) =>
+        // Object reference properties are overridden by objectReference, including None.
+        (old !== null && typeof old === 'object' && 'fileID' in (old as RecordValue)) ||
+        fileId(reference) !== '0'
+          ? { ...reference }
+          : (change.value ?? (typeof old === 'string' ? '' : old)),
+      )
+      if (!applied) warn(`${asset.path}: prefab override ${path} is not converted.`)
+    }
+    // The instance root is parented to m_TransformParent (fileID 0 for a variant's root).
+    const parent = record(modification.m_TransformParent)
+    for (const doc of merged.values())
+      if (
+        (doc.type === 'Transform' || doc.type === 'RectTransform') &&
+        fileId(doc.value.m_Father) === '0'
+      )
+        doc.value.m_Father = { fileID: fileId(parent) }
+    for (const doc of merged.values()) {
+      if (ids.has(doc.id))
+        throw new Error(`${asset.path}: duplicate Unity fileID after merging prefab instances.`)
+      ids.add(doc.id)
+      result.push(doc)
+    }
+  }
+  if (result.length > 20000) throw new Error(`${asset.path}: invalid Unity object count.`)
+  return result
 }
 
 type Scalar = ConstantValue | IntervalValue | PiecewiseBezier
@@ -703,13 +888,28 @@ function localForce(
 
 /** Unity's default-resources ("extra") GUID for built-in shaders and materials. */
 const BUILTIN_EXTRA_GUID = '0000000000000000f000000000000000'
-/** Built-in Standard (45, 46) and Particles/Standard Surface/Unlit (210, 211) tint with _Color. */
-const BUILTIN_SHADER_COLOR: Record<string, string> = {
-  '45': '_Color',
-  '46': '_Color',
-  '210': '_Color',
-  '211': '_Color',
+interface BuiltinShader {
+  /** Tint property, or undefined for shaders without a material tint. */
+  tint?: string
+  /** 'floats': blend/depth/cull come from the material's _SrcBlend/_DstBlend/_ZWrite/_Cull. */
+  blend: 'floats' | { src: number; dst: number }
 }
+/**
+ * Built-in shaders by default-resources fileID. Standard (45, 46) and Particles/Standard
+ * Surface/Unlit (210, 211) declare blend properties; UI/Default (10770) and the Mobile particle
+ * shaders (10720 Additive, 10721 Alpha Blended) have fixed blending, no depth writes or culling,
+ * and the mobile ones have no tint, so properties saved by earlier shaders are ignored.
+ */
+const BUILTIN_SHADERS: Record<string, BuiltinShader> = {
+  '45': { tint: '_Color', blend: 'floats' },
+  '46': { tint: '_Color', blend: 'floats' },
+  '210': { tint: '_Color', blend: 'floats' },
+  '211': { tint: '_Color', blend: 'floats' },
+  '10720': { blend: { src: 5, dst: 1 } },
+  '10721': { blend: { src: 5, dst: 10 } },
+  '10770': { tint: '_Color', blend: { src: 5, dst: 10 } },
+}
+const BLEND_PROPERTIES = ['_SrcBlend', '_DstBlend', '_BlendOp', '_ZWrite', '_Cull']
 /** Built-in Default-Particle material: a soft white sprite with alpha blending. */
 const BUILTIN_DEFAULT_PARTICLE = '10301'
 const COLOR_PROPERTIES = ['_BaseColor', '_TintColor', '_Color']
@@ -833,6 +1033,95 @@ async function encodePng(width: number, height: number, rgba: Uint8Array): Promi
   return `data:image/png;base64,${btoa(binary)}`
 }
 
+/**
+ * The merged (composite) image of an 8-bit Grayscale/RGB Photoshop file, which is what Unity
+ * imports. Raw and PackBits (RLE) image data are supported; a fourth channel is alpha. With
+ * Unity's "Remove Matte (PSD)" option, colors are un-matted from the white composite background.
+ */
+export function decodePsd(
+  bytes: Uint8Array,
+  removeMatte = false,
+): { width: number; height: number; rgba: Uint8Array } {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const fail = (reason: string): never => {
+    throw new Error(`Unsupported or malformed PSD: ${reason}.`)
+  }
+  let offset = 0
+  const need = (length: number) => {
+    if (offset + length > bytes.length) fail('truncated file')
+  }
+  const u16 = () => (need(2), (offset += 2), view.getUint16(offset - 2))
+  const u32 = () => (need(4), (offset += 4), view.getUint32(offset - 4))
+  const skip = (length: number) => (need(length), (offset += length))
+  if (u32() !== 0x38425053) fail('missing 8BPS signature')
+  if (u16() !== 1) fail('large-document (PSB) files are not supported')
+  skip(6)
+  const channels = u16()
+  const height = u32()
+  const width = u32()
+  const depth = u16()
+  const mode = u16()
+  if (depth !== 8) fail(`${depth}-bit channels`)
+  if (mode !== 1 && mode !== 3) fail('only Grayscale and RGB color modes are supported')
+  const colorChannels = mode === 3 ? 3 : 1
+  if (channels < colorChannels || channels > 56) fail('invalid channel count')
+  if (!width || !height || width > 8192 || height > 8192) fail('dimensions must be 1–8192 pixels')
+  skip(u32()) // color mode data
+  skip(u32()) // image resources
+  skip(u32()) // layer and mask information
+  const compression = u16()
+  const used = Math.min(channels, colorChannels + 1)
+  const plane = width * height
+  const planes = Array.from({ length: used }, () => new Uint8Array(plane))
+  if (compression === 0) {
+    for (const data of planes) {
+      need(plane)
+      data.set(bytes.subarray(offset, offset + plane))
+      offset += plane
+    }
+  } else if (compression === 1) {
+    const counts: number[] = []
+    for (let i = 0; i < channels * height; i++) counts.push(u16())
+    for (let channel = 0; channel < used; channel++)
+      for (let row = 0; row < height; row++) {
+        const end = offset + counts[channel * height + row]!
+        if (end > bytes.length) fail('truncated RLE data')
+        const data = planes[channel]!
+        let x = row * width
+        const rowEnd = x + width
+        while (offset < end) {
+          const header = (bytes[offset++]! << 24) >> 24
+          if (header >= 0) {
+            const length = header + 1
+            if (x + length > rowEnd || offset + length > end) fail('RLE row overflow')
+            data.set(bytes.subarray(offset, offset + length), x)
+            offset += length
+            x += length
+          } else if (header !== -128) {
+            const length = 1 - header
+            if (x + length > rowEnd || offset >= end) fail('RLE row overflow')
+            data.fill(bytes[offset++]!, x, x + length)
+            x += length
+          }
+        }
+        if (x !== rowEnd) fail('RLE row length mismatch')
+      }
+  } else fail(`compression ${compression}`)
+  const rgba = new Uint8Array(plane * 4)
+  const alpha = planes[colorChannels]
+  for (let i = 0; i < plane; i++) {
+    const a = alpha ? alpha[i]! : 255
+    for (let c = 0; c < 3; c++) {
+      let value = planes[colorChannels === 3 ? c : 0]![i]!
+      if (removeMatte && alpha && a > 0 && a < 255)
+        value = Math.max(0, Math.min(255, Math.round(((value - (255 - a)) * 255) / a)))
+      rgba[i * 4 + c] = value
+    }
+    rgba[i * 4 + 3] = a
+  }
+  return { width, height, rgba }
+}
+
 /** An approximation of Unity's Default-Particle texture: white with a smooth radial alpha falloff. */
 async function defaultParticleTexture(): Promise<string> {
   const size = 64
@@ -850,22 +1139,20 @@ async function convertPrefab(
   asset: Asset,
   assets: ReadonlyMap<string, Asset>,
 ): Promise<UnityPrefabImport> {
-  const docs = objects(asset)
-  // shortcut: prefab overrides are not resolved, unpack completely in Unity until override merging is implemented.
-  if (
-    docs.some(
-      (doc) =>
-        doc.type === 'PrefabInstance' || fileId(doc.value.m_CorrespondingSourceObject) !== '0',
-    )
-  )
-    throw new Error(
-      `${asset.path}: nested prefabs/variants are not yet supported. Unpack the prefab completely in Unity and export again.`,
-    )
+  const warnings = new Set<string>()
+  const warn: Warn = (message) => warnings.add(message)
+  const docs = resolvePrefabObjects(asset, assets, warn)
   const particles = docs.filter((doc) => doc.type === 'ParticleSystem')
   if (!particles.length) throw new Error(`${asset.path}: no Shuriken Particle Systems found.`)
   if (particles.length > 512) throw new Error('A prefab must not exceed 512 Particle Systems.')
-  const warnings = new Set<string>()
-  const warn: Warn = (message) => warnings.add(message)
+  const uiParticles = docs.filter(isUIParticle)
+  // An enabled UIParticle renders its listed systems through the canvas and disables their
+  // ParticleSystemRenderers, so those renderers are serialized as disabled.
+  const canvasRendered = new Set(
+    uiParticles
+      .filter((doc) => enabled(doc.value.m_Enabled ?? 1))
+      .flatMap((doc) => array(doc.value.m_Particles).map(fileId)),
+  )
   const root = new THREE.Group()
   root.name = asset.path
     .split('/')
@@ -1003,11 +1290,19 @@ async function convertPrefab(
     // Materials keep stale properties from earlier shaders, so the tint is the property the
     // current shader declares; a shader declaring none of them is untinted.
     const declared = shaderSource !== undefined ? shaderProperties(shaderSource) : undefined
-    const builtinColor =
-      shaderId === BUILTIN_EXTRA_GUID ? BUILTIN_SHADER_COLOR[fileId(data.m_Shader)] : undefined
+    const builtin =
+      shaderId === BUILTIN_EXTRA_GUID ? BUILTIN_SHADERS[fileId(data.m_Shader)] : undefined
+    if (builtin)
+      for (const name of BLEND_PROPERTIES) if (builtin.blend !== 'floats') delete floats[name]
+    if (declared)
+      // A saved float the shader does not declare is stale; [_Prop] Blend directives are read
+      // from the floats by shaderBlend, so only declared properties remain.
+      for (const name of BLEND_PROPERTIES) if (!declared.has(name)) delete floats[name]
+    // Without the shader, saved floats may be stale defaults (Standard keeps One/Zero opaque).
+    const unverified = !declared && !builtin
     let tintProperty: string | undefined
     if (declared) tintProperty = COLOR_PROPERTIES.find((name) => declared.has(name))
-    else if (builtinColor) tintProperty = builtinColor
+    else if (builtin) tintProperty = builtin.tint
     else {
       const present = COLOR_PROPERTIES.filter((name) => colors[name] !== undefined)
       tintProperty = present[0]
@@ -1023,8 +1318,8 @@ async function convertPrefab(
     // (gamma) values: serialized colors are therefore used without color-space conversion.
     result.color.setRGB(tint.x, tint.y, tint.z, THREE.LinearSRGBColorSpace)
     result.opacity = tint.w
-    if (floats._ZWrite !== undefined) result.depthWrite = enabled(floats._ZWrite)
-    if (floats._Cull !== undefined)
+    if (floats._ZWrite !== undefined && !unverified) result.depthWrite = enabled(floats._ZWrite)
+    if (floats._Cull !== undefined && !unverified)
       result.side =
         number(floats._Cull) === 0
           ? THREE.DoubleSide
@@ -1033,16 +1328,33 @@ async function convertPrefab(
             : THREE.FrontSide
     if (enabled(floats._AlphaClip) || enabled(floats._AlphaTest) || keywords.has('_ALPHATEST_ON'))
       result.alphaTest = number(floats._Cutoff, 0.5)
-    const blend =
-      floats._SrcBlend !== undefined && floats._DstBlend !== undefined
-        ? { src: number(floats._SrcBlend), dst: number(floats._DstBlend) }
-        : shaderSource !== undefined
-          ? shaderBlend(shaderSource, floats)
-          : undefined
+    let blend =
+      builtin && builtin.blend !== 'floats'
+        ? builtin.blend
+        : floats._SrcBlend !== undefined && floats._DstBlend !== undefined
+          ? { src: number(floats._SrcBlend), dst: number(floats._DstBlend) }
+          : shaderSource !== undefined
+            ? shaderBlend(shaderSource, floats)
+            : undefined
     const op = Math.floor(number(floats._BlendOp))
-    if (blend === undefined)
+    if (
+      unverified &&
+      blend !== undefined &&
+      blend !== 'opaque' &&
+      blend.src === 1 &&
+      blend.dst === 0
+    ) {
+      // An opaque state read from unverifiable floats would turn transparent texels into
+      // solid quads; alpha blending renders opaque texels identically.
+      warn(
+        `${source.path}: shader is unavailable and its saved blend floats (One/Zero) may be stale; using normal alpha blending. Include the shader in the package for exact blending.`,
+      )
+      blend = undefined
+    } else if (blend === undefined)
       warn(`${source.path}: blend state is unavailable; using normal alpha blending.`)
-    else if (blend === 'opaque' || (blend.src === 1 && blend.dst === 0 && op === 0)) {
+    if (blend === undefined) {
+      // Normal alpha blending: the material defaults.
+    } else if (blend === 'opaque' || (blend.src === 1 && blend.dst === 0 && op === 0)) {
       result.transparent = false
       result.depthWrite = true
     } else if (
@@ -1076,26 +1388,47 @@ async function convertPrefab(
           warn(
             `${source.path}: texture ${textureId} is missing. Export with Include dependencies enabled.`,
           )
-        else if (!/\.(png|jpe?g|webp|gif)$/i.test(image.path))
+        else if (!/\.(png|jpe?g|webp|gif|psd)$/i.test(image.path))
           warn(
             `${image.path}: texture format is not supported; convert it to PNG in Unity before exporting.`,
           )
         else {
           const extension = image.path.split('.').at(-1)!.toLowerCase()
-          const url = await readTextureFile(
-            new File([image.data], image.path.split('/').at(-1)!, {
-              type: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
-            }),
-          )
-          texture = new THREE.Texture()
-          texture.name = image.path
-          // Quarks' unlit particle shader does not encode its output, so decoding sRGB texels
-          // would darken them; raw sampling reproduces Unity's displayed texture colors.
-          texture.colorSpace = THREE.NoColorSpace
-          textureUrls.set(texture.uuid, url)
-          textureCache.set(textureId, texture)
-          if (image.meta) {
-            const importer = record(yaml(decoder.decode(image.meta)).TextureImporter)
+          const importer = image.meta
+            ? record(yaml(decoder.decode(image.meta)).TextureImporter)
+            : {}
+          let url: string | undefined
+          if (extension === 'psd') {
+            if (image.data.length > 16 * MB) warn(`${image.path}: texture exceeds 16 MB.`)
+            else
+              try {
+                const { width, height, rgba } = decodePsd(
+                  image.data,
+                  enabled(importer.pSDRemoveMatte),
+                )
+                url = await encodePng(width, height, rgba)
+                warn(
+                  `${image.path}: Photoshop texture is converted from its merged composite image to PNG.`,
+                )
+              } catch (error) {
+                warn(
+                  `${image.path}: ${error instanceof Error ? error.message : 'invalid PSD'} Convert it to PNG in Unity before exporting.`,
+                )
+              }
+          } else
+            url = await readTextureFile(
+              new File([image.data], image.path.split('/').at(-1)!, {
+                type: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
+              }),
+            )
+          if (url) {
+            texture = new THREE.Texture()
+            texture.name = image.path
+            // Quarks' unlit particle shader does not encode its output, so decoding sRGB texels
+            // would darken them; raw sampling reproduces Unity's displayed texture colors.
+            texture.colorSpace = THREE.NoColorSpace
+            textureUrls.set(texture.uuid, url)
+            textureCache.set(textureId, texture)
             const settings = record(importer.textureSettings)
             const wrap = (value: unknown) =>
               number(value) === 1
@@ -1138,7 +1471,7 @@ async function convertPrefab(
         if (transforms.has(id)) throw new Error('Duplicate transform on Unity GameObject.')
         transforms.set(id, doc)
       } else if (
-        doc.type === 'MonoBehaviour' ||
+        (doc.type === 'MonoBehaviour' && !isUIParticle(doc)) ||
         doc.type === 'Animator' ||
         doc.type === 'Animation' ||
         doc.type === 'VisualEffect'
@@ -1170,6 +1503,67 @@ async function convertPrefab(
       const parent = parentId === '0' ? root : nodes.get(byTransform.get(parentId)!)
       if (!parent) throw new Error(`${node.name}: missing parent GameObject.`)
       parent.add(node)
+    }
+    const depth = (node: THREE.Object3D) => {
+      let count = 0
+      for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) count++
+      return count
+    }
+    const uiParticleReport: RecordValue[] = []
+    for (const doc of uiParticles
+      .filter((doc) => nodes.has(fileId(doc.value.m_GameObject)))
+      .sort(
+        (a, b) =>
+          depth(nodes.get(fileId(a.value.m_GameObject))!) -
+          depth(nodes.get(fileId(b.value.m_GameObject))!),
+      )) {
+      const node = nodes.get(fileId(doc.value.m_GameObject))!
+      const data = doc.value
+      const active = enabled(data.m_Enabled ?? 1)
+      // UIParticle 4.x: None, UIParticle, Transform. The legacy m_AutoScaling flag meant Transform.
+      const scalingMode =
+        data.m_AutoScalingMode !== undefined
+          ? number(data.m_AutoScalingMode)
+          : enabled(data.m_AutoScaling)
+            ? 2
+            : 0
+      const scale3D = record(data.m_Scale3D)
+      const scale =
+        data.m_Scale3D !== undefined
+          ? ['x', 'y', 'z'].map((axis) => number(scale3D[axis], 1))
+          : Array<number>(3).fill(number(data.m_Scale, 1))
+      if (active && scalingMode === 2) {
+        // Transform mode drives localScale so the world scale is one; Unity serializes driven
+        // RectTransform properties as zero, so the saved scale is not the runtime value.
+        node.parent!.updateWorldMatrix(true, false)
+        const parentScale = node.parent!.getWorldScale(new THREE.Vector3())
+        node.scale.set(
+          ...(parentScale.toArray().map((value) => (value ? 1 / value : 1)) as [
+            number,
+            number,
+            number,
+          ]),
+        )
+      }
+      const listed = array(data.m_Particles).map(fileId)
+      uiParticleReport.push({
+        gameObject: node.name,
+        enabled: active,
+        scale,
+        autoScalingMode: scalingMode,
+        positionMode: number(data.m_PositionMode),
+        particleSystems: listed.length,
+      })
+      if (!active) continue
+      warn(
+        `${node.name}: UIParticle renders ${listed.length} Particle System(s) on a UI canvas at scale ${scale.join(' × ')}; the effect is converted in particle units, so scale it by that factor to match canvas pixels.`,
+      )
+      if (number(data.m_PositionMode) === 1)
+        warn(
+          `${node.name}: UIParticle Absolute position mode does not scale emitter offsets; positions are converted unscaled.`,
+        )
+      if (enabled(data.m_IsTrail))
+        warn(`${node.name}: UIParticle trail rendering is not converted.`)
     }
     for (const doc of particles) {
       const data = doc.value
@@ -1534,7 +1928,8 @@ async function convertPrefab(
       systems.push(system)
       systemsByUnityId.set(doc.id, system)
       system.emitter.name = label
-      system.emitter.visible = mode !== 5 && enabled(renderer.m_Enabled ?? 1)
+      system.emitter.visible =
+        mode !== 5 && (enabled(renderer.m_Enabled ?? 1) || canvasRendered.has(doc.id))
       for (let ancestor: THREE.Object3D | null = parent; ancestor; ancestor = ancestor.parent)
         system.emitter.visible &&= ancestor.visible
       const shapeData = record(data.ShapeModule)
@@ -1613,6 +2008,7 @@ async function convertPrefab(
       source: asset.path,
       warnings: [...warnings],
       shaders: Object.fromEntries(shaderNames),
+      ...(uiParticleReport.length ? { uiParticles: uiParticleReport } : {}),
     }
     root.updateMatrixWorld(true)
     const json = root.toJSON() as unknown as QuarksDocument

@@ -1182,7 +1182,7 @@ describe('Unity package import', () => {
   it.each([
     [
       prefab + '\n--- !u!1001 &42\nPrefabInstance:\n  m_SourcePrefab: {fileID: 1}\n',
-      'nested prefabs/variants',
+      'source prefab .* is not in the package',
     ],
     [prefab.replace('m_Father: {fileID: 0}', 'm_Father: {fileID: 9007199254740997}'), 'Cyclic'],
     [prefab.replace('m_Father: {fileID: 0}', 'm_Father: {fileID: 42}'), 'missing parent'],
