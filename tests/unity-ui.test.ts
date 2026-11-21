@@ -576,10 +576,18 @@ ${extra}  RotationModule:`
     })
     // Start size 0.5 times trail width 2 times canvas scale 0.25.
     expect(emitter(sized.json, 'Fire').ps.startSize).toMatchObject({ value: 0.25 })
+    // A system in Local scaling mode keeps the canvas-scaled trail width.
+    const localPackage = await readUnityPackage(
+      packageFile(packageEntries(ui.replace('  InitialModule:', '  scalingMode: 1\n  InitialModule:'))),
+    )
+    const local = await localPackage.convertPrefab(localPackage.prefabs[0]!, {
+      canvasWorldScale: 0.25,
+    })
+    expect(emitter(local.json, 'Fire').ps.startSize).toMatchObject({ value: 0.5 })
   })
 
   it('scales the project gravity by the canvas only for UIParticle-scaled systems', async () => {
-    const gravityY = async (mode: number) => {
+    const gravityY = async (mode: number, scalingMode?: number) => {
       const text = uiPrefab(
         uiParticle(
           ROOT_GO,
@@ -591,7 +599,7 @@ ${extra}  RotationModule:`
         ),
       ).replace(
         '  InitialModule:\n    enabled: 1\n',
-        '  InitialModule:\n    enabled: 1\n    gravityModifier: {minMaxState: 0, scalar: 1}\n',
+        `${scalingMode === undefined ? '' : `  scalingMode: ${scalingMode}\n`}  InitialModule:\n    enabled: 1\n    gravityModifier: {minMaxState: 0, scalar: 1}\n`,
       )
       const unity = await readUnityPackage(packageFile(packageEntries(text)))
       const { json, warnings } = await unity.convertPrefab(unity.prefabs[0]!, {
@@ -604,6 +612,11 @@ ${extra}  RotationModule:`
     }
     expect(await gravityY(1)).toBe(-5)
     expect(await gravityY(2)).toBe(-20)
+    // Hierarchy scaling keeps the canvas factor; Local scaling is compensated by UIParticle, so
+    // gravity keeps its size relative to the particles.
+    expect(await gravityY(1, 0)).toBe(-5)
+    expect(await gravityY(1, 1)).toBe(-20)
+    expect(await gravityY(2, 1)).toBe(-20)
   })
 })
 

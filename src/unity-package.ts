@@ -1759,6 +1759,10 @@ export async function convertUnityPrefab(
             'UIParticle scaling: gravity and trail widths depend on the UI canvas world scale, which is not given; using 1.',
           )
       }
+      // A system in Local scaling mode does not inherit the canvas scale, so UIParticle multiplies
+      // its baked mesh by the root canvas scale (UIParticleRenderer.GetWorldScale): its world-space
+      // gravity then keeps its size relative to the particles. Trail widths still follow the canvas.
+      const gravityScale = number(data.scalingMode) === 1 ? 1 : canvasScale
       const gravity = record(initial.gravityModifier)
       const gravityMode = number(gravity.minMaxState)
       const hasGravity =
@@ -1776,7 +1780,7 @@ export async function convertUnityPrefab(
               initial.gravityModifier,
               0,
               'Gravity Modifier',
-              (options.gravity ?? -9.81) * canvasScale,
+              (options.gravity ?? -9.81) * gravityScale,
             ),
             new ConstantValue(0),
           ),
