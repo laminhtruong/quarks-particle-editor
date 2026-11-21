@@ -35,6 +35,16 @@
       "types": "./dist/document.d.ts",
       "import": "./dist/document.js"
     },
+    "./unity": {
+      "source": "./src/unity-package.ts",
+      "types": "./dist/unity-package.d.ts",
+      "import": "./dist/unity-package.js"
+    },
+    "./runtime": {
+      "source": "./src/unity-behaviors.ts",
+      "types": "./dist/unity-behaviors.d.ts",
+      "import": "./dist/unity-behaviors.js"
+    },
     "./loader": {
       "types": "./dist/project-loader.d.ts",
       "import": "./dist/project-loader.js"

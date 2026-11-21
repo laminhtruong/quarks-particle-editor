@@ -37,6 +37,7 @@ import style from './style.css?inline'
 import { bindColorEditor, colorEditorMarkup } from './color-editor.js'
 import { bindCurveEditor, curveEditorMarkup } from './curve-editor.js'
 import { readTextureFile, resolveFolderAssets, resolveLocalTextures } from './local-files.js'
+import { loadUnityPlugin } from './unity-behaviors.js'
 import {
   addFolderAsset,
   existingFile,
@@ -66,6 +67,9 @@ import {
 } from './native-properties.js'
 import type { NativePath, NativeRecord, PropertyContext } from './native-properties.js'
 
+// Effects converted from Unity can use behaviors that Quarks does not ship.
+loadUnityPlugin()
+
 // three.quarks 0.17.1 serializes burst cycle/interval but its emitter never reads them.
 const burstRepeatNote =
   'Quarks 0.17.1 plays each burst once per loop and ignores cycles/interval; add bursts instead.'
@@ -74,6 +78,7 @@ export { parseQuarksDocument, quarksDocumentSchema } from './document.js'
 export type { QuarksDocument } from './document.js'
 export { intervalBounds, updateParticlePreview } from './preview.js'
 export { readUnityPackage } from './unity-package.js'
+export { loadUnityPlugin, RandomColorFromGradient } from './unity-behaviors.js'
 export { loadProjectEffect } from './project-loader.js'
 export { resolveMeshAssets } from './mesh-assets.js'
 export type { UnityPackage, UnityPrefabImport } from './unity-package.js'

@@ -396,7 +396,9 @@ describe('Unity package import', () => {
     const { json, warnings } = await load(text)
     const ps = (json.object as any).children[0].children[1].ps
     const limit = ps.behaviors.find((b: any) => b.type === 'LimitSpeedOverLife')
-    expect(limit).toMatchObject({ dampen: 0.6, speed: { type: 'ConstantValue', value: 2 } })
+    expect(limit).toMatchObject({ speed: { type: 'ConstantValue', value: 2 } })
+    // Unity's 0.6 per 1/30 s step, as Quarks' per-second excess × dampen × 20.
+    expect(limit.dampen).toBeCloseTo(-1.5 * Math.log(0.4))
     expect(warnings.join('\n')).toContain('drag is not converted')
     expect(warnings.join('\n')).not.toContain('ClampVelocityModule is enabled but not converted')
     const separate = await load(text.replace('dampen: 0.6', 'separateAxis: 1\n    dampen: 0.6'))

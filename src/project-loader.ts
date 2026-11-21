@@ -2,8 +2,13 @@ import { FileLoader, LoaderUtils, type LoadingManager, type Object3D } from 'thr
 import { QuarksLoader } from 'three.quarks'
 import { parseQuarksDocument } from './document.js'
 import { readMeshJson, resolveMeshAssets } from './mesh-assets.js'
+import { loadUnityPlugin } from './unity-behaviors.js'
 
 export { resolveMeshAssets } from './mesh-assets.js'
+export { loadUnityPlugin } from './unity-behaviors.js'
+
+// Effects converted from Unity can use behaviors that Quarks does not ship.
+loadUnityPlugin()
 
 /** Resolve external geometry before handing the native document to Quarks. */
 export async function loadProjectEffect(url: string, manager?: LoadingManager): Promise<Object3D> {

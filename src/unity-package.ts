@@ -28,6 +28,7 @@ import {
   Rotation3DOverLife,
   RotationBySpeed,
   SizeOverLife,
+  WidthOverLength,
   SubParticleEmitMode,
   SphereEmitter,
   Vector3 as QVector3,
@@ -38,6 +39,7 @@ import type { ColorGenerator, FunctionColorGenerator, EmitterShape } from 'three
 import { parseQuarksDocument } from './document.js'
 import type { QuarksDocument } from './document.js'
 import { readTextureFile } from './local-files.js'
+import { ColorOverTrail, RandomColorFromGradient } from './unity-behaviors.js'
 import { createUnityBuiltinMesh, readUnityMesh } from './unity-mesh.js'
 
 type RecordValue = Record<string, unknown>
@@ -49,10 +51,31 @@ interface UnityObject {
   /** A placeholder for an object supplied by a prefab instance (`--- !u!N &id stripped`). */
   stripped?: boolean
 }
-interface Asset {
+/** A Unity asset: its project path, file bytes and `.meta` bytes. */
+export interface UnityAsset {
   path: string
   data: Uint8Array<ArrayBuffer>
   meta?: Uint8Array<ArrayBuffer>
+}
+type Asset = UnityAsset
+
+export interface UnityConvertOptions {
+  /**
+   * Convert only this Transform and its descendants (a fileID in the resolved prefab, using Unity's
+   * prefab-instance IDs). The subtree root keeps its rotation and scale but not its position or
+   * active state: the caller places, shows and hides it, as a UI layout does with a UIParticle.
+   */
+  root?: string
+  /** Decodes a raster texture into a data URL; defaults to the browser image decoder. */
+  readTexture?: (data: Uint8Array<ArrayBuffer>, path: string, type: string) => Promise<string>
+  /**
+   * World units per canvas unit of the root UI canvas. With UIParticle's "UIParticle" scaling
+   * mode, its Particle Systems inherit the canvas scale but absolute trail widths do not, so a
+   * trail's width relative to its particles depends on the canvas the effect is shown in.
+   */
+  canvasWorldScale?: number
+  /** The project's Physics gravity along Y (Project Settings > Physics); defaults to -9.81. */
+  gravity?: number
 }
 
 export interface UnityPrefabImport {
@@ -63,7 +86,7 @@ export interface UnityPrefabImport {
 
 export interface UnityPackage {
   prefabs: string[]
-  convertPrefab(path: string): Promise<UnityPrefabImport>
+  convertPrefab(path: string, options?: UnityConvertOptions): Promise<UnityPrefabImport>
 }
 
 const MB = 1024 * 1024
@@ -110,10 +133,10 @@ export async function readUnityPackage(
     )
   return {
     prefabs,
-    async convertPrefab(path) {
+    async convertPrefab(path, options) {
       const asset = [...assets.values()].find((asset) => asset.path === path)
       if (!asset || !prefabs.includes(path)) throw new Error('Choose a prefab from this package.')
-      return convertPrefab(asset, assets)
+      return convertUnityPrefab(asset, assets, options)
     },
   }
 }
@@ -217,12 +240,34 @@ async function readAssets(
   return assets
 }
 
+/**
+ * Unity writes the closing quote of a multi-line prefab override value at column one, which YAML
+ * rejects as under-indented; indent it as a continuation line of that value.
+ */
+const indentQuoteContinuations = (text: string) =>
+  text.replace(
+    /^([ \t]*(?:-[ \t]+)?value:[ \t]*)'((?:[^'\r\n]|'')*)(\r?\n(?:[ \t]*\r?\n)*)'(?=\r?$)/gm,
+    (_, prefix: string, value: string, blankLines: string) => {
+      const indentation = /^[ \t]*/.exec(prefix)![0]
+      const continuation =
+        indentation + (prefix.slice(indentation.length).startsWith('-') ? '    ' : '  ')
+      return `${prefix}'${value}${blankLines}${continuation}'`
+    },
+  )
+
 function yaml(text: string): RecordValue {
   // GUIDs can be all digits, including leading zeros; they are identifiers, not YAML integers.
-  const document = parseDocument(
-    text.replace(/\bguid: ([a-f\d]{32})(?=[,}\s]|$)/gi, 'guid: "$1"'),
-    { intAsBigInt: true, uniqueKeys: true, schema: 'core' },
-  )
+  const parse = (source: string) =>
+    parseDocument(source.replace(/\bguid: ([a-f\d]{32})(?=[,}\s]|$)/gi, 'guid: "$1"'), {
+      intAsBigInt: true,
+      uniqueKeys: true,
+      schema: 'core',
+    })
+  let document = parse(text)
+  if (document.errors.some((error) => error.message.includes("Missing closing 'quote"))) {
+    const repaired = indentQuoteContinuations(text)
+    if (repaired !== text) document = parse(repaired)
+  }
   if (document.errors.length) throw new Error(`Invalid Unity YAML: ${document.errors[0]!.message}`)
   return record(document.toJS({ maxAliasCount: 0 }))
 }
@@ -721,8 +766,8 @@ function offsetFrames(value: PiecewiseBezier, offset: number): PiecewiseBezier {
 
 function gradient(value: unknown, warn: Warn, label: string): Gradient {
   const data = record(value)
-  if (number(data.m_Mode) !== 0)
-    warn(`${label}: fixed/perceptual gradient interpolation is approximated as linear.`)
+  const mode = number(data.m_Mode)
+  if (mode === 2) warn(`${label}: perceptual gradient interpolation is approximated as linear.`)
   const colors: [QVector3, number][] = []
   const alphas: [number, number][] = []
   for (let i = 0; i < Math.min(8, number(data.m_NumColorKeys, 2)); i++) {
@@ -735,10 +780,15 @@ function gradient(value: unknown, warn: Warn, label: string): Gradient {
   for (let i = 0; i < Math.min(8, number(data.m_NumAlphaKeys, 2)); i++)
     alphas.push([rgba(data[`key${i}`]).w, number(data[`atime${i}`], i ? 65535 : 0) / 65535])
   if (!colors.length || !alphas.length) throw new Error(`${label}: gradient has no keys.`)
-  return new Gradient(
-    colors.sort((a, b) => a[1] - b[1]),
-    alphas.sort((a, b) => a[1] - b[1]),
-  )
+  // Unity's Fixed mode holds each key's value from the previous key's time up to its own time.
+  const keys = <T>(list: [T, number][]) => {
+    const sorted = list.sort((a, b) => a[1] - b[1])
+    if (mode !== 1) return sorted
+    return sorted.flatMap((key, i): [T, number][] =>
+      i ? [[key[0], Math.min(key[1], sorted[i - 1]![1] + 1e-4)], key] : [key],
+    )
+  }
+  return new Gradient(keys(colors), keys(alphas))
 }
 
 function color(value: unknown, warn: Warn, label: string): ColorGenerator | FunctionColorGenerator {
@@ -769,6 +819,14 @@ function lifetimeColor(value: unknown, warn: Warn): FunctionColorGenerator {
     return new RandomColorBetweenGradient(flat(generator.a), flat(generator.b))
   return flat(generator.genColor([], new QVector4()))
 }
+
+/**
+ * Unity removes the dampen fraction of a particle's excess speed per 1/30 s step (measured against
+ * Unity footage); Quarks removes excess × dampen × 20 per second. Equal decay rates give
+ * 20·q = −30·ln(1 − d). Quarks' per-frame factor 1 − 20·q·dt must stay positive at 60 FPS.
+ */
+const quarksDampen = (dampen: number) =>
+  dampen >= 1 ? 3 : Math.min(3, -1.5 * Math.log(1 - dampen))
 
 // Uniform random samples on a native grid; each axis is quantized to this many cells.
 const GRID_CELLS = 2 ** 12
@@ -988,7 +1046,11 @@ function shaderBlend(
   }
   const src = factor(match[1]),
     dst = factor(match[2])
-  return src === undefined || dst === undefined ? undefined : { src, dst }
+  if (src === undefined || dst === undefined) return undefined
+  // A fragment that premultiplies its own color by alpha (`color.rgb *= color.a`, as UI particle
+  // shaders do) under Blend One X blends like SrcAlpha X with Quarks' unpremultiplied output.
+  if (src === 1 && /\.rgb\s*\*=\s*[\w.]+\.a\b/.test(code)) return { src: 5, dst }
+  return { src, dst }
 }
 
 /** Minimal RGBA PNG encoder for generated built-in textures (zlib via CompressionStream). */
@@ -1135,22 +1197,75 @@ async function defaultParticleTexture(): Promise<string> {
   return encodePng(size, size, pixels)
 }
 
-async function convertPrefab(
+/** The GameObjects, Transforms and components under `root`, with `root` detached from its parent. */
+function subtree(docs: UnityObject[], root: string): UnityObject[] {
+  const transforms = docs.filter((doc) => doc.type === 'Transform' || doc.type === 'RectTransform')
+  if (!transforms.some((doc) => doc.id === root))
+    throw new Error(`Transform ${root} is not in the prefab.`)
+  const kept = new Set([root])
+  for (let grew = true; grew;) {
+    grew = false
+    for (const doc of transforms)
+      if (!kept.has(doc.id) && kept.has(fileId(doc.value.m_Father))) {
+        kept.add(doc.id)
+        grew = true
+      }
+  }
+  const objects = new Set(
+    transforms.filter((doc) => kept.has(doc.id)).map((doc) => fileId(doc.value.m_GameObject)),
+  )
+  const top = fileId(transforms.find((doc) => doc.id === root)!.value.m_GameObject)
+  return docs.flatMap((doc) => {
+    if (doc.id === top) return [{ ...doc, value: { ...doc.value, m_IsActive: 1 } }]
+    if (doc.id === root)
+      return [
+        {
+          ...doc,
+          value: { ...doc.value, m_Father: { fileID: '0' }, m_LocalPosition: { x: 0, y: 0, z: 0 } },
+        },
+      ]
+    return objects.has(doc.id) || objects.has(fileId(doc.value.m_GameObject)) ? [doc] : []
+  })
+}
+
+/**
+ * Converts a Unity prefab (with its nested prefabs and variants) to a native Quarks document.
+ * `assets` maps GUIDs to the prefab's dependencies.
+ */
+export async function convertUnityPrefab(
   asset: Asset,
   assets: ReadonlyMap<string, Asset>,
+  options: UnityConvertOptions = {},
 ): Promise<UnityPrefabImport> {
   const warnings = new Set<string>()
   const warn: Warn = (message) => warnings.add(message)
-  const docs = resolvePrefabObjects(asset, assets, warn)
+  const resolved = resolvePrefabObjects(asset, assets, warn)
+  const docs = options.root ? subtree(resolved, options.root) : resolved
+  const readTexture =
+    options.readTexture ??
+    ((data, path, type) => readTextureFile(new File([data], path.split('/').at(-1)!, { type })))
   const particles = docs.filter((doc) => doc.type === 'ParticleSystem')
   if (!particles.length) throw new Error(`${asset.path}: no Shuriken Particle Systems found.`)
   if (particles.length > 512) throw new Error('A prefab must not exceed 512 Particle Systems.')
   const uiParticles = docs.filter(isUIParticle)
+  // A UI canvas has no depth: UIParticle effects keep only X/Y offsets (Unity UI prefabs often carry
+  // large Z values that the canvas ignores).
+  const flat = uiParticles.some((doc) => enabled(doc.value.m_Enabled ?? 1))
   // An enabled UIParticle renders its listed systems through the canvas and disables their
   // ParticleSystemRenderers, so those renderers are serialized as disabled.
   const canvasRendered = new Set(
     uiParticles
       .filter((doc) => enabled(doc.value.m_Enabled ?? 1))
+      .flatMap((doc) => array(doc.value.m_Particles).map(fileId)),
+  )
+  // Systems of an enabled UIParticle in "UIParticle" auto scaling mode keep the canvas scale.
+  const canvasScaled = new Set(
+    uiParticles
+      .filter(
+        (doc) =>
+          enabled(doc.value.m_Enabled ?? 1) &&
+          number(doc.value.m_AutoScalingMode, enabled(doc.value.m_AutoScaling) ? 2 : 0) === 1,
+      )
       .flatMap((doc) => array(doc.value.m_Particles).map(fileId)),
   )
   const root = new THREE.Group()
@@ -1416,10 +1531,10 @@ async function convertPrefab(
                 )
               }
           } else
-            url = await readTextureFile(
-              new File([image.data], image.path.split('/').at(-1)!, {
-                type: `image/${extension === 'jpg' ? 'jpeg' : extension}`,
-              }),
+            url = await readTexture(
+              image.data,
+              image.path,
+              `image/${extension === 'jpg' ? 'jpeg' : extension}`,
             )
           if (url) {
             texture = new THREE.Texture()
@@ -1486,7 +1601,7 @@ async function convertPrefab(
         q = record(transform.m_LocalRotation),
         s = record(transform.m_LocalScale)
       // Unity is left-handed: reflect Z, and conjugate rotations by that reflection.
-      node.position.set(number(p.x), number(p.y), -number(p.z))
+      node.position.set(number(p.x), number(p.y), flat ? 0 : -number(p.z) || 0)
       node.quaternion.set(-number(q.x), -number(q.y), number(q.z), number(q.w, 1)).normalize()
       node.scale.set(number(s.x, 1), number(s.y, 1), number(s.z, 1))
       const parentId = fileId(transform.m_Father)
@@ -1582,15 +1697,21 @@ async function convertPrefab(
       const mode = number(renderer.m_RenderMode)
       const simulationSpace = number(data.moveWithTransform)
       const geometry = mode === 4 ? await mesh(renderer.m_Mesh, localWarn) : undefined
-      const renderMode = geometry
-        ? RenderMode.Mesh
-        : mode === 1
-          ? RenderMode.StretchedBillBoard
-          : mode === 2
-            ? RenderMode.HorizontalBillBoard
-            : mode === 3
-              ? RenderMode.VerticalBillBoard
-              : RenderMode.BillBoard
+      // Trails module (Particles mode): Quarks draws each particle as its trail ribbon instead of
+      // a sprite with a trail, so the particle sprite itself is not drawn.
+      const trail = record(data.TrailModule)
+      const trails = enabled(trail.enabled) && number(trail.mode) === 0 && !geometry
+      const renderMode = trails
+        ? RenderMode.Trail
+        : geometry
+          ? RenderMode.Mesh
+          : mode === 1
+            ? RenderMode.StretchedBillBoard
+            : mode === 2
+              ? RenderMode.HorizontalBillBoard
+              : mode === 3
+                ? RenderMode.VerticalBillBoard
+                : RenderMode.BillBoard
       if (!renderers.has(id))
         localWarn('Missing ParticleSystemRenderer; using billboard rendering.')
       if (
@@ -1601,9 +1722,11 @@ async function convertPrefab(
       if (geometry && ['x', 'y', 'z'].some((axis) => number(record(renderer.m_Pivot)[axis]) !== 0))
         localWarn('Mesh renderer pivot is not converted.')
       const refs = array(renderer.m_Materials)
-      if (refs.slice(1).some((reference) => fileId(reference) !== '0'))
+      // Unity draws trails with the renderer's second (trail) material.
+      const trailMaterial = trails && fileId(refs[1]) !== '0' ? refs[1] : undefined
+      if (!trails && refs.slice(1).some((reference) => fileId(reference) !== '0'))
         localWarn('Only the first renderer material is used.')
-      const mat = await material(refs[0])
+      const mat = await material(trailMaterial ?? refs[0])
       const behaviors = []
       const convertedModules = new Set<string>()
       if (enabled(record(data.ColorModule).enabled))
@@ -1625,6 +1748,17 @@ async function convertPrefab(
                 (value(size.curve, 1, 'Size over Lifetime') as unknown as PiecewiseBezier),
           ),
         )
+      // UIParticle's "UIParticle" scaling keeps the canvas scale on its systems' particles, while
+      // world-unit values (gravity, trail ribbon widths) stay in world units: relative to the
+      // particles they are scaled by the canvas world scale.
+      let canvasScale = 1
+      if (canvasScaled.has(doc.id)) {
+        if (options.canvasWorldScale) canvasScale = options.canvasWorldScale
+        else
+          localWarn(
+            'UIParticle scaling: gravity and trail widths depend on the UI canvas world scale, which is not given; using 1.',
+          )
+      }
       const gravity = record(initial.gravityModifier)
       const gravityMode = number(gravity.minMaxState)
       const hasGravity =
@@ -1638,11 +1772,16 @@ async function convertPrefab(
         behaviors.push(
           new ForceOverLife(
             new ConstantValue(0),
-            value(initial.gravityModifier, 0, 'Gravity Modifier', -9.81),
+            value(
+              initial.gravityModifier,
+              0,
+              'Gravity Modifier',
+              (options.gravity ?? -9.81) * canvasScale,
+            ),
             new ConstantValue(0),
           ),
         )
-      if (hasGravity)
+      if (hasGravity && options.gravity === undefined)
         localWarn(
           'Gravity Modifier: using Unity default gravity (-9.81 m/s²); project settings are not in the package.',
         )
@@ -1748,10 +1887,12 @@ async function convertPrefab(
             new LimitSpeedOverLife(
               // Runtime/JSON accept value generators; see SizeOverLife above.
               value(limit.magnitude, 1, 'Speed limit') as unknown as PiecewiseBezier,
-              Math.max(0, Math.min(1, number(limit.dampen, 1))),
+              quarksDampen(Math.max(0, Math.min(1, number(limit.dampen, 1)))),
             ),
           )
-          localWarn('Limit Velocity: Quarks damping approximates Unity damping; motion may differ.')
+          localWarn(
+            'Limit Velocity: damping is matched at 30 FPS steps; motion may differ slightly.',
+          )
         }
         if (
           number(record(limit.drag).scalar) ||
@@ -1761,6 +1902,72 @@ async function convertPrefab(
           localWarn('Limit Velocity: drag is not converted.')
       }
       const startLife = value(initial.startLifetime, 5, 'Start Lifetime')
+      // Trail width: the trail's own width, times the particle size when size affects width.
+      const sizedTrail = enabled(trail.sizeAffectsWidth)
+      let trailWidth: Scalar = new ConstantValue(1)
+      let trailSizeFactor = 1
+      let trailLength = 0
+      if (trails) {
+        convertedModules.add('TrailModule')
+        // Unity builds trail ribbons in world units, so their width scales with the canvas too.
+        trailWidth = value(trail.widthOverTrail, 1, 'Trail width', canvasScale)
+        if (sizedTrail) {
+          if (trailWidth instanceof PiecewiseBezier)
+            localWarn(
+              'Trails: width over trail is not combined with particle size; its scale is used.',
+            )
+          trailSizeFactor =
+            canvasScale *
+            number(record(trail.widthOverTrail).scalar, number(trail.widthOverTrail, 1))
+        } else {
+          if (trailWidth instanceof PiecewiseBezier) behaviors.push(new WidthOverLength(trailWidth))
+          for (let i = behaviors.length - 1; i >= 0; i--)
+            if (behaviors[i] instanceof SizeOverLife) behaviors.splice(i, 1)
+        }
+        const overTrail = record(trail.colorOverTrail)
+        if (number(overTrail.minMaxState) === 1)
+          behaviors.push(
+            new ColorOverTrail(gradient(overTrail.maxGradient, localWarn, 'Color over Trail')),
+          )
+        else if (
+          number(overTrail.minMaxState) !== 0 ||
+          JSON.stringify(rgba(overTrail.maxColor)) !== JSON.stringify(rgba({}))
+        )
+          localWarn('Trails: colorOverTrail other than a gradient is not converted.')
+        // Quarks records one trail point per update; Unity's trail lifetime is a fraction of the
+        // particle lifetime. Convert it to a point count at 60 updates per second.
+        const lifetime = number(record(trail.lifetime).scalar, number(trail.lifetime, 1))
+        trailLength = Math.max(
+          2,
+          Math.ceil(lifetime * number(record(initial.startLifetime).scalar, 5) * 60),
+        )
+        localWarn('Trails: particles are drawn as their trails only; trail length assumes 60 FPS.')
+        if (!enabled(trail.inheritParticleColor ?? 1))
+          localWarn(
+            'Trails: trail colors that do not inherit the particle color are not converted.',
+          )
+        const overLifetime = record(trail.colorOverLifetime)
+        if (
+          number(overLifetime.minMaxState) !== 0 ||
+          JSON.stringify(rgba(overLifetime.maxColor)) !== JSON.stringify(rgba({}))
+        )
+          localWarn('Trails: colorOverLifetime is not converted.')
+      }
+      const trailSize = (fallback: Scalar | Vector3Function) =>
+        !trails || sizedTrail
+          ? fallback
+          : trailWidth instanceof PiecewiseBezier
+            ? new ConstantValue(1)
+            : systemValue(trailWidth)
+      const startColorData = record(initial.startColor)
+      // Unity's Random Color mode picks a random point of the gradient for each particle.
+      const randomStartColor = number(startColorData.minMaxState) === 4
+      if (randomStartColor)
+        behaviors.unshift(
+          new RandomColorFromGradient(
+            gradient(startColorData.maxGradient, localWarn, 'Start Color'),
+          ),
+        )
       const sheet = textureSheet(record(data.UVModule), startLife, localWarn)
       if (sheet.frame) behaviors.push(new FrameOverLife(sheet.frame))
       for (const [key, module] of Object.entries(data))
@@ -1880,13 +2087,15 @@ async function convertPrefab(
         shape: shape(data.ShapeModule, localWarn, !!geometry),
         startLife: systemValue(startLife),
         startSpeed: timed(initial.startSpeed, 5, 'Start Speed'),
-        startSize: enabled(initial.size3D)
-          ? new Vector3Function(
-              timed(initial.startSize, 1, 'Start Size X'),
-              timed(initial.startSizeY, 1, 'Start Size Y'),
-              timed(initial.startSizeZ, 1, 'Start Size Z'),
-            )
-          : timed(initial.startSize, 1, 'Start Size'),
+        startSize: trailSize(
+          enabled(initial.size3D)
+            ? new Vector3Function(
+                timed(initial.startSize, 1, 'Start Size X', trailSizeFactor),
+                timed(initial.startSizeY, 1, 'Start Size Y', trailSizeFactor),
+                timed(initial.startSizeZ, 1, 'Start Size Z', trailSizeFactor),
+              )
+            : timed(initial.startSize, 1, 'Start Size', trailSizeFactor),
+        ),
         // Preserve mesh orientation when replacing the reflected emitter with an X half-turn.
         startRotation: geometry
           ? enabled(initial.rotation3D)
@@ -1903,7 +2112,9 @@ async function convertPrefab(
                 'YXZ',
               )
           : timed(initial.startRotation, 0, 'Start Rotation', -1),
-        startColor: color(initial.startColor, localWarn, 'Start Color'),
+        startColor: randomStartColor
+          ? new ConstantColor(new QVector4(1, 1, 1, 1))
+          : color(initial.startColor, localWarn, 'Start Color'),
         emissionOverTime: activeEmission
           ? systemValue(value(emission.rateOverTime ?? emission.rate, 10, 'Emission rate'), true)
           : new ConstantValue(0),
@@ -1913,8 +2124,9 @@ async function convertPrefab(
         emissionBursts: bursts,
         renderMode,
         renderOrder: number(renderer.m_SortingOrder),
-        rendererEmitterSettings:
-          mode === 1
+        rendererEmitterSettings: trails
+          ? { startLength: new ConstantValue(trailLength), followLocalOrigin: false }
+          : mode === 1
             ? {
                 speedFactor: number(renderer.m_VelocityScale),
                 lengthFactor: number(renderer.m_LengthScale, 2),
